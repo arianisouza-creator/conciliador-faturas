@@ -30,14 +30,14 @@ def limpar_valor(valor_str):
         return 0.0
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Conciliador por Funcionário", page_icon="💳", layout="centered")
+st.set_page_config(page_title="Conciliador Universal", page_icon="💳", layout="centered")
 
 st.title("💳 Conciliador de Cartão por Funcionário")
-st.markdown("Faça o upload da Fatura e de **um ou mais** Relatórios de Viagens para conciliar.")
+st.markdown("Faça o upload da Fatura e de qualquer Relatório/Planilha em PDF para conciliar.")
 
 arquivo_fatura = st.file_uploader("1. Faça o upload da Fatura do Cartão (PDF)", type=["pdf"])
 arquivos_viagens = st.file_uploader(
-    "2. Faça o upload do(s) Relatório(s) de Viagens/Pedidos (PDF)", 
+    "2. Faça o upload dos Relatórios de Pedidos / Planilhas (PDF)", 
     type=["pdf"], 
     accept_multiple_files=True
 )
@@ -46,7 +46,6 @@ if arquivo_fatura and arquivos_viagens:
     
     txt_fatura = ler_pdf_bytes(arquivo_fatura.getvalue())
     
-    # Processa todos os relatórios de viagens
     txt_viagens_consolidado = ""
     for arq_viagem in arquivos_viagens:
         txt_viagens_consolidado += ler_pdf_bytes(arq_viagem.getvalue()) + "\n"
@@ -80,27 +79,43 @@ if arquivo_fatura and arquivos_viagens:
                     capturando = False
                     break
 
-            # --- 3. CAPTURA ALINHADA DE PEDIDOS E VALORES (MÉTODO DA COLUNA) ---
+            # --- 3. MAPEAMENTO INTELIGENTE (VALOR + PEDIDO SEM PEGAR O ANO) ---
             banco_de_dados_viagens = []
+            linhas_v = txt_viagens_consolidado.split("\n")
             
-            # Captura TODOS os números de pedidos (4 a 7 dígitos) e TODOS os valores (R$) do documento de viagens
-            todos_pedidos = re.findall(r'\b(\d{4,7})\b', txt_viagens_consolidado)
-            todos_valores = re.findall(r'R\$\s*([\d\.,]+)', txt_viagens_consolidado)
-            todos_locs = re.findall(r'\b([A-Z0-9]{6})\b', txt_viagens_consolidado)
-
-            # Sincroniza as listas por posição (Mapeamento Direto)
-            total_itens = max(len(todos_valores), len(todos_pedidos))
+            ultimo_pedido_valido = "N/A"
+            ultimo_loc_valido = None
             
-            for i in range(total_itens):
-                pedido = todos_pedidos[i] if i < len(todos_pedidos) else "N/A"
-                valor_str = todos_valores[i] if i < len(todos_valores) else "0,00"
-                loc = todos_locs[i] if i < len(todos_locs) else None
+            for lv in linhas_v:
+                # Localizador (6 dígitos de letras e números)
+                loc_m = re.search(r'\b([A-Z0-9]{6})\b', lv)
+                if loc_m and not loc_m.group(1).isdigit(): 
+                    ultimo_loc_valido = loc_m.group(1)
                 
-                banco_de_dados_viagens.append({
-                    "Loc": loc,
-                    "Pedido": pedido,
-                    "ValorPuro": limpar_valor(valor_str)
-                })
+                # Busca por possíveis números de pedido (4 a 7 dígitos)
+                todos_numeros = re.findall(r'\b(\d{4,7})\b', lv)
+                for num in todos_numeros:
+                    # REGRA CRÍTICA: Se o número capturado for 2026, 2025, 2027 (anos das datas), ele ignora!
+                    if num in ["2025", "2026", "2027", "0226"]:
+                        continue
+                    else:
+                        ultimo_pedido_valido = num
+                        break # Pega o primeiro número válido da linha que não seja o ano
+                
+                # Procura o valor financeiro na linha
+                valor_m = re.search(r'R\$\s*([\d\.,\s]+)', lv)
+                if valor_m:
+                    v_texto = valor_m.group(1).strip()
+                    valores_capturados = [v.strip() for v in re.split(r'\s+', v_texto) if v.strip()]
+                    
+                    for v_individual in valores_capturados:
+                        v_puro = limpar_valor(v_individual)
+                        if v_puro > 0:
+                            banco_de_dados_viagens.append({
+                                "Loc": ultimo_loc_valido,
+                                "Pedido": ultimo_pedido_valido,
+                                "ValorPuro": v_puro
+                            })
             
             # --- 4. PROCESSANDO OS LANÇAMENTOS EXCLUSIVOS DA PESSOA ---
             final_dados = []
@@ -122,9 +137,8 @@ if arquivo_fatura and arquivos_viagens:
                     descricao = linha.strip()[:40]
                     pedido_encontrado = "PENDENTE"
                     
-                    # Procura no nosso banco sincronizado
+                    # Procura combinando o valor ou o localizador
                     for p in banco_de_dados_viagens:
-                        # Se bater o localizador ou o valor aproximado (com tolerância de centavos)
                         if (loc_fatura and p['Loc'] and loc_fatura == p['Loc']) or (abs(valor_fatura_puro - p['ValorPuro']) < 0.20):
                             pedido_encontrado = p['Pedido']
                             break
@@ -171,5 +185,7 @@ if arquivo_fatura and arquivos_viagens:
                     file_name=f"Conciliacao_{nome_selecionado.replace(' ', '_')}.pdf",
                     mime="application/pdf"
                 )
+            else:
+                st.warning("Nenhum lançamento de compras válido foi localizado para este funcionário.")
             else:
                 st.warning("Nenhum lançamento de compras válido foi localizado para este funcionário.")
