@@ -17,7 +17,7 @@ def ler_pdf_bytes(conteudo_bytes):
         return ""
 
 def limpar_valor(valor_str):
-    if not valor_str or pd.isna(valor_str):
+    if not valor_str:
         return 0.0
     dado_limpo = re.sub(r'[^\d,.]', '', str(valor_str))
     if ',' in dado_limpo and '.' in dado_limpo:
@@ -30,24 +30,27 @@ def limpar_valor(valor_str):
         return 0.0
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Conciliador Inteligente", page_icon="💳", layout="centered")
+st.set_page_config(page_title="Conciliador Universal PDF", page_icon="💳", layout="centered")
 
 st.title("💳 Conciliador de Cartão por Funcionário")
-st.markdown("Envie a fatura em PDF e cole os dados do seu Excel para conciliar sem erros.")
+st.markdown("Faça o upload da Fatura e de **um ou mais** Relatórios/Planilhas em PDF para conciliar.")
 
-# 1. Upload da Fatura em PDF
+# Upload de arquivos (Voltamos ao modelo padrão de arquivos)
 arquivo_fatura = st.file_uploader("1. Faça o upload da Fatura do Cartão (PDF)", type=["pdf"])
-
-# 2. Caixa de Texto para dar Ctrl+V do Excel
-dados_colados = st.text_area(
-    "2. Selecione as células no seu Excel, copie (Ctrl+C) e cole (Ctrl+V) aqui embaixo:",
-    height=250,
-    placeholder="Cole aqui as linhas e colunas da sua planilha..."
+arquivos_viagens = st.file_uploader(
+    "2. Faça o upload dos Relatórios de Pedidos / Planilhas (PDF) - Aceita múltiplos arquivos", 
+    type=["pdf"], 
+    accept_multiple_files=True
 )
 
-if arquivo_fatura and dados_colados.strip():
+if arquivo_fatura and arquivos_viagens:
     
     txt_fatura = ler_pdf_bytes(arquivo_fatura.getvalue())
+    
+    # Consolida o texto de todos os relatórios de pedidos enviados
+    txt_viagens_consolidado = ""
+    for arq_viagem in arquivos_viagens:
+        txt_viagens_consolidado += ler_pdf_bytes(arq_viagem.getvalue()) + "\n"
 
     # --- 1. DETECTAR OS NOMES DISPONÍVEIS NA FATURA ---
     nomes_fatura = sorted(list(set(re.findall(r'(?:Total\s+para|para)\s+([A-Z\s]{4,30})', txt_fatura, re.IGNORECASE))))
@@ -67,7 +70,7 @@ if arquivo_fatura and dados_colados.strip():
             
             primeiro_nome = nome_selecionado.split()[0]
             
-            for linha in lines_fatura:
+            for linha in linhas_fatura:
                 if primeiro_nome in linha.upper() and ("CARTÃO" in linha.upper() or len(linha.strip()) < 40):
                     capturando = True
                 
@@ -78,59 +81,45 @@ if arquivo_fatura and dados_colados.strip():
                     capturando = False
                     break
 
-            # --- 3. PROCESSAMENTO TOLERANTE DO CTRL+V (MÉTODO ANTI-TOKENIZAÇÃO) ---
+            # --- 3. MAPEAMENTO TEXTUAL DE PEDIDOS (MÉTODO ULTRA SEGURO) ---
             banco_de_dados_viagens = []
+            linhas_v = txt_viagens_consolidado.split("\n")
             
-            # Quebra o bloco colado em linhas puras
-            linhas_coladas = [l.strip() for l in dados_colados.split("\n") if l.strip()]
-            
-            # Variáveis para guardar o histórico das células mescladas
             ultimo_pedido_valido = "N/A"
             ultimo_loc_valido = None
             
-            for linha_c in linhas_coladas:
-                # O Excel separa colunas por TABULAÇÃO (\t) ao copiar
-                colunas = linha_c.split("\t")
+            for lv in linhas_v:
+                # Localizador (6 dígitos de letras e números)
+                loc_m = re.search(r'\b([A-Z0-9]{6})\b', lv)
+                if loc_m and not loc_m.group(1).isdigit(): 
+                    ultimo_loc_valido = loc_m.group(1).upper()
                 
-                ped_celula = ""
-                val_celula = ""
-                loc_celula = ""
+                # Busca números de pedido (4 a 7 dígitos) ignorando anos vigentes
+                todos_numeros = re.findall(r'\b(\d{4,7})\b', lv)
+                for num in todos_numeros:
+                    if num in ["2025", "2026", "2027", "0226"]:
+                        continue
+                    else:
+                        ultimo_pedido_valido = num
+                        break
                 
-                # Identifica dinamicamente o que é valor e o que é pedido pelo conteúdo da célula
-                for celula in colunas:
-                    celula_limpa = str(celula).strip()
+                # Valores financeiros na linha
+                valores_na_linha = re.findall(r'(?:R\$\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})|(?:\s)(\d{1,3}\.\d{2})\b', lv)
+                for match_val in valores_na_linha:
+                    val_texto = match_val[0] if match_val[0] else match_val[1]
+                    v_puro = limpar_valor(val_texto)
                     
-                    # 1. Se tem "R$" ou formato de dinheiro com vírgula nas últimas posições, é o VALOR
-                    if "R$" in celula_limpa or re.search(r'\d+,\d{2}$', celula_limpa):
-                        val_celula = celula_limpa
-                        
-                    # 2. Se tem de 4 a 7 dígitos e não é o ano 2026/2025, é o PEDIDO
-                    elif celula_limpa.isdigit() and len(celula_limpa) >= 4 and len(celula_limpa) <= 7:
-                        if celula_limpa not in ["2025", "2026", "2027", "0226"]:
-                            ped_celula = celula_limpa
-                            
-                    # 3. Se tem exatamente 6 dígitos de letras e números, é o LOCALIZADOR
-                    elif len(celula_limpa) == 6 and re.match(r'^[A-Z0-9]{6}$', celula_limpa.upper()) and not celula_limpa.isdigit():
-                        loc_celula = celula_limpa
-                
-                # Inteligência de Memória para Células Mescladas:
-                # Se a linha atual veio sem pedido/localizador (célula mesclada no Excel), ela herda o último válido
-                if ped_celula: ultimo_pedido_valido = ped_celula
-                if loc_celula: ultimo_loc_valido = loc_celula.upper()
-                
-                v_puro = limpar_valor(val_celula)
-                
-                if v_puro > 0:
-                    banco_de_dados_viagens.append({
-                        "Loc": ultimo_loc_valido,
-                        "Pedido": ultimo_pedido_valido,
-                        "ValorPuro": v_puro
-                    })
-
+                    if v_puro > 0:
+                        banco_de_dados_viagens.append({
+                            "Loc": ultimo_loc_valido,
+                            "Pedido": ultimo_pedido_valido,
+                            "ValorPuro": v_puro
+                        })
+            
             # --- 4. PROCESSANDO OS LANÇAMENTOS EXCLUSIVOS DA PESSOA ---
             final_dados = []
             
-            for linha in linhas_da_pessoa:
+            for linha in linhas_fatura:
                 if "TOTAL" in linha.upper() or "CARTÃO" in linha.upper():
                     continue
                     
@@ -147,19 +136,28 @@ if arquivo_fatura and dados_colados.strip():
                     descricao = linha.strip()[:40]
                     pedido_encontrado = "PENDENTE"
                     
-                    # Realiza o batimento
-                    for p in banco_de_dados_viagens:
-                        if loc_fatura and p['Loc'] and loc_fatura == p['Loc']:
-                            pedido_encontrado = p['Pedido']
-                            break
-                        # Tolerância elástica automática para faturas de hotéis/hospedagens (taxas extras de até R$ 55)
-                        elif abs(valor_fatura_puro - p['ValorPuro']) < 55.00 and any(h in descricao.upper() for h in ["EXPEDIA", "HOTEL", "AIRBNB"]):
-                            pedido_encontrado = p['Pedido']
-                            break
-                        elif abs(valor_fatura_puro - p['ValorPuro']) < 0.20:
-                            pedido_encontrado = p['Pedido']
-                            break
+                    # Batimento Inteligente de Contingência
+                    # 1ª Tentativa: Localizador exato
+                    if loc_fatura:
+                        for p in banco_de_dados_viagens:
+                            if p['Loc'] == loc_fatura:
+                                pedido_encontrado = p['Pedido']
+                                break
                     
+                    # 2ª Tentativa: Por aproximação de valor exato
+                    if pedido_encontrado == "PENDENTE":
+                        for p in banco_de_dados_viagens:
+                            if abs(valor_fatura_puro - p['ValorPuro']) < 0.20:
+                                pedido_encontrado = p['Pedido']
+                                break
+                                
+                    # 3ª Tentativa: Hospedagens (Expedia/Airbnb/Hotéis) com taxas adicionadas na fatura
+                    if pedido_encontrado == "PENDENTE" and any(h in descricao.upper() for h in ["EXPEDIA", "HOTEL", "AIRBNB"]):
+                        for p in banco_de_dados_viagens:
+                            if abs(valor_fatura_puro - p['ValorPuro']) < 55.00 and p['Pedido'] != "N/A":
+                                pedido_encontrado = p['Pedido']
+                                break
+
                     valor_exibicao = valor_fatura if ',' in valor_fatura and len(valor_fatura.split(',')[1]) == 2 else f"{valor_fatura}0"
                     final_dados.append([data_m.group(1), descricao, valor_exibicao, pedido_encontrado])
 
