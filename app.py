@@ -17,10 +17,8 @@ def ler_pdf_bytes(conteudo_bytes):
         return ""
 
 def limpar_valor(valor_str):
-    """Transforma qualquer string de valor (R$ 1.234,56 ou 1234.56) em um número float puro para comparação"""
     if not valor_str:
         return 0.0
-    # Remove símbolos, espaços e troca pontos por nada, e vírgula por ponto (ou vice-versa)
     dado_limpo = re.sub(r'[^\d,.]', '', valor_str)
     if ',' in dado_limpo and '.' in dado_limpo:
         dado_limpo = dado_limpo.replace('.', '').replace(',', '.')
@@ -74,27 +72,36 @@ if arquivo_fatura and arquivo_viagens:
                     capturando = False
                     break
 
-            # --- 3. MAPEANDO PEDIDOS DO RELATÓRIO DE VIAGENS (MÉTODO ROBUSTO) ---
+            # --- 3. MAPEANDO PEDIDOS DO RELATÓRIO DE VIAGENS (COM INTELIGÊNCIA DE BLOCO) ---
             pedidos_viagens = []
             linhas_v = txt_viagens.split("\n")
             
+            # Variáveis de memória para guardar dados de células mescladas secundárias
+            ultimo_loc = None
+            ultimo_pedido = "N/A"
+            
+            # Passo 1: Varre de baixo para cima ou agrupa dados próximos
+            # Como o PDF extrai misturado, vamos capturar todos os Localizadores e Valores vigentes no documento
+            banco_de_dados_viagens = []
             for lv in linhas_v:
                 loc_m = re.search(r'\b([A-Z0-9]{6})\b', lv)
                 valor_m = re.search(r'R\$\s*([\d\.,\s]+)', lv)
                 pedido_m = re.search(r'\b(\d{4,7})\b', lv)
                 
+                if loc_m: ultimo_loc = loc_m.group(1)
+                if pedido_m: ultimo_pedido = pedido_m.group(1)
+                
                 if valor_m:
                     v_texto = valor_m.group(1).strip()
-                    # Trata casos onde múltiplos valores aparecem na mesma célula de texto
                     valores_capturados = [v.strip() for v in re.split(r'\s+', v_texto) if v.strip()]
                     
                     for v_individual in valores_capturados:
-                        pedidos_viagens.append({
-                            "Loc": loc_m.group(1) if loc_m else None,
-                            "Pedido": pedido_m.group(1) if pedido_m else "N/A",
+                        banco_de_dados_viagens.append({
+                            "Loc": ultimo_loc,
+                            "Pedido": ultimo_pedido if ultimo_pedido != "N/A" else "N/A (Em Branco)",
                             "ValorPuro": limpar_valor(v_individual)
                         })
-
+            
             # --- 4. PROCESSANDO OS LANÇAMENTOS EXCLUSIVOS DA PESSOA ---
             final_dados = []
             
@@ -114,10 +121,14 @@ if arquivo_fatura and arquivo_viagens:
                     descricao = linha.strip()[:40]
                     pedido_encontrado = "PENDENTE"
                     
-                    # Cruzamento por valor numérico puro ou Localizador
-                    for p in pedidos_viagens:
+                    # Busca flexível: Se bater o Localizador OU se bater o Valor Puro da Fatura
+                    for p in banco_de_dados_viagens:
                         if (loc_fatura and loc_fatura == p['Loc']) or (abs(valor_fatura_puro - p['ValorPuro']) < 0.05):
-                            pedido_encontrado = p['Pedido']
+                            # Se o pedido na planilha estiver em branco, mostra o Localizador para ajudar o usuário
+                            if p['Pedido'] == "N/A (Em Branco)" and p['Loc']:
+                                pedido_encontrado = f"S/ Nº (Loc: {p['Loc']})"
+                            else:
+                                pedido_encontrado = p['Pedido']
                             break
                     
                     final_dados.append([data_m.group(1), descricao, valor_fatura, pedido_encontrado])
@@ -148,8 +159,10 @@ if arquivo_fatura and arquivo_viagens:
                     pdf.cell(20, 10, r[0], 1, 0, 'C')
                     pdf.cell(85, 10, r[1][:45], 1, 0, 'L')
                     pdf.cell(35, 10, r[2], 1, 0, 'C')
-                    if r[3] == "PENDENTE":
+                    if "PENDENTE" in r[3]:
                         pdf.set_text_color(255, 0, 0)
+                    elif "S/ Nº" in r[3]:
+                        pdf.set_text_color(255, 128, 0) # Laranja para achado mas sem número
                     pdf.cell(50, 10, r[3], 1, 1, 'C')
                     pdf.set_text_color(0, 0, 0)
 
