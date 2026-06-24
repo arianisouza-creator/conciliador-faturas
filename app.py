@@ -87,22 +87,18 @@ if arquivo_fatura and arquivos_viagens:
             ultimo_loc_valido = None
             
             for lv in linhas_v:
-                # Localizador (6 dígitos de letras e números)
                 loc_m = re.search(r'\b([A-Z0-9]{6})\b', lv)
                 if loc_m and not loc_m.group(1).isdigit(): 
                     ultimo_loc_valido = loc_m.group(1)
                 
-                # Busca por possíveis números de pedido (4 a 7 dígitos)
                 todos_numeros = re.findall(r'\b(\d{4,7})\b', lv)
                 for num in todos_numeros:
-                    # REGRA CRÍTICA: Se o número capturado for 2026, 2025, 2027 (anos das datas), ele ignora!
                     if num in ["2025", "2026", "2027", "0226"]:
                         continue
                     else:
                         ultimo_pedido_valido = num
-                        break # Pega o primeiro número válido da linha que não seja o ano
+                        break
                 
-                # Procura o valor financeiro na linha
                 valor_m = re.search(r'R\$\s*([\d\.,\s]+)', lv)
                 if valor_m:
                     v_texto = valor_m.group(1).strip()
@@ -137,7 +133,6 @@ if arquivo_fatura and arquivos_viagens:
                     descricao = linha.strip()[:40]
                     pedido_encontrado = "PENDENTE"
                     
-                    # Procura combinando o valor ou o localizador
                     for p in banco_de_dados_viagens:
                         if (loc_fatura and p['Loc'] and loc_fatura == p['Loc']) or (abs(valor_fatura_puro - p['ValorPuro']) < 0.20):
                             pedido_encontrado = p['Pedido']
@@ -185,7 +180,5 @@ if arquivo_fatura and arquivos_viagens:
                     file_name=f"Conciliacao_{nome_selecionado.replace(' ', '_')}.pdf",
                     mime="application/pdf"
                 )
-            else:
-                st.warning("Nenhum lançamento de compras válido foi localizado para este funcionário.")
             else:
                 st.warning("Nenhum lançamento de compras válido foi localizado para este funcionário.")
