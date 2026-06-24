@@ -73,16 +73,12 @@ if arquivo_fatura and arquivo_viagens:
                     break
 
             # --- 3. MAPEANDO PEDIDOS DO RELATÓRIO DE VIAGENS (COM INTELIGÊNCIA DE BLOCO) ---
-            pedidos_viagens = []
+            banco_de_dados_viagens = []
             linhas_v = txt_viagens.split("\n")
             
-            # Variáveis de memória para guardar dados de células mescladas secundárias
             ultimo_loc = None
             ultimo_pedido = "N/A"
             
-            # Passo 1: Varre de baixo para cima ou agrupa dados próximos
-            # Como o PDF extrai misturado, vamos capturar todos os Localizadores e Valores vigentes no documento
-            banco_de_dados_viagens = []
             for lv in linhas_v:
                 loc_m = re.search(r'\b([A-Z0-9]{6})\b', lv)
                 valor_m = re.search(r'R\$\s*([\d\.,\s]+)', lv)
@@ -110,28 +106,36 @@ if arquivo_fatura and arquivo_viagens:
                     continue
                     
                 data_m = re.search(r'(\d{2}/\d{2})', linha)
-                valor_m = re.search(r'(\d{1,3}(?:\.\d{3})*,\d{2})', linha)
                 
-                if data_m and valor_m:
+                # Procura por qualquer valor monetário na linha (ex: 1.619,62 ou 1.619,6)
+                valores_na_linha = re.findall(r'(\d{1,3}(?:\.\d{3})*,\d{1,2})', linha)
+                
+                if data_m and valores_na_linha:
+                    # Pega o maior valor encontrado na linha (geralmente o valor correto da coluna)
+                    valor_fatura = max(valores_na_linha, key=len)
+                    valor_fatura_puro = limpar_valor(valor_fatura)
+                    
                     loc_m = re.search(r'\b([A-Z0-9]{6})\b', linha)
                     loc_fatura = loc_m.group(1) if loc_m else None
-                    valor_fatura = valor_m.group(1)
                     
-                    valor_fatura_puro = limpar_valor(valor_fatura)
                     descricao = linha.strip()[:40]
                     pedido_encontrado = "PENDENTE"
                     
-                    # Busca flexível: Se bater o Localizador OU se bater o Valor Puro da Fatura
+                    # Busca flexível multidirecional
                     for p in banco_de_dados_viagens:
-                        if (loc_fatura and loc_fatura == p['Loc']) or (abs(valor_fatura_puro - p['ValorPuro']) < 0.05):
-                            # Se o pedido na planilha estiver em branco, mostra o Localizador para ajudar o usuário
-                            if p['Pedido'] == "N/A (Em Branco)" and p['Loc']:
-                                pedido_encontrado = f"S/ Nº (Loc: {p['Loc']})"
-                            else:
-                                pedido_encontrado = p['Pedido']
+                        # 1. Se os localizadores forem iguais, é o match perfeito
+                        if loc_fatura and p['Loc'] and loc_fatura == p['Loc']:
+                            pedido_encontrado = p['Pedido'] if p['Pedido'] != "N/A (Em Branco)" else f"S/ Nº (Loc: {p['Loc']})"
+                            break
+                        # 2. Se a diferença do valor for de centavos (decorrente de cortes de texto), aceita o match
+                        elif abs(valor_fatura_puro - p['ValorPuro']) < 0.10:
+                            pedido_encontrado = p['Pedido'] if p['Pedido'] != "N/A (Em Branco)" else f"S/ Nº (Loc: {p['Loc']})"
                             break
                     
-                    final_dados.append([data_m.group(1), descricao, valor_fatura, pedido_encontrado])
+                    # Formata visualmente o valor exibido caso venha cortado
+                    valor_exibicao = valor_fatura if ',' in valor_fatura and len(valor_fatura.split(',')[1]) == 2 else f"{valor_fatura}0"
+
+                    final_dados.append([data_m.group(1), descricao, valor_exibicao, pedido_encontrado])
 
             # --- 5. EXIBIÇÃO DOS RESULTADOS ---
             st.write(f"### 📋 Lançamentos encontrados para: **{nome_selecionado}**")
@@ -162,7 +166,7 @@ if arquivo_fatura and arquivo_viagens:
                     if "PENDENTE" in r[3]:
                         pdf.set_text_color(255, 0, 0)
                     elif "S/ Nº" in r[3]:
-                        pdf.set_text_color(255, 128, 0) # Laranja para achado mas sem número
+                        pdf.set_text_color(255, 128, 0)
                     pdf.cell(50, 10, r[3], 1, 1, 'C')
                     pdf.set_text_color(0, 0, 0)
 
