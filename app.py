@@ -19,7 +19,7 @@ def ler_pdf_bytes(conteudo_bytes):
 def limpar_valor(valor_str):
     if not valor_str:
         return 0.0
-    dado_limpo = re.sub(r'[^\d,.]', '', str(valor_str))
+    dado_limpo = re.sub(r'[^\d,.]', '', valor_str)
     if ',' in dado_limpo and '.' in dado_limpo:
         dado_limpo = dado_limpo.replace('.', '').replace(',', '.')
     elif ',' in dado_limpo:
@@ -30,15 +30,14 @@ def limpar_valor(valor_str):
         return 0.0
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Conciliador Universal PDF", page_icon="💳", layout="centered")
+st.set_page_config(page_title="Conciliador Universal", page_icon="💳", layout="centered")
 
 st.title("💳 Conciliador de Cartão por Funcionário")
-st.markdown("Faça o upload da Fatura e de **um ou mais** Relatórios/Planilhas em PDF para conciliar.")
+st.markdown("Faça o upload da Fatura e de qualquer Relatório/Planilha em PDF para conciliar.")
 
-# Upload de arquivos (Voltamos ao modelo padrão de arquivos)
 arquivo_fatura = st.file_uploader("1. Faça o upload da Fatura do Cartão (PDF)", type=["pdf"])
 arquivos_viagens = st.file_uploader(
-    "2. Faça o upload dos Relatórios de Pedidos / Planilhas (PDF) - Aceita múltiplos arquivos", 
+    "2. Faça o upload dos Relatórios de Pedidos / Planilhas (PDF)", 
     type=["pdf"], 
     accept_multiple_files=True
 )
@@ -47,7 +46,6 @@ if arquivo_fatura and arquivos_viagens:
     
     txt_fatura = ler_pdf_bytes(arquivo_fatura.getvalue())
     
-    # Consolida o texto de todos os relatórios de pedidos enviados
     txt_viagens_consolidado = ""
     for arq_viagem in arquivos_viagens:
         txt_viagens_consolidado += ler_pdf_bytes(arq_viagem.getvalue()) + "\n"
@@ -81,7 +79,7 @@ if arquivo_fatura and arquivos_viagens:
                     capturando = False
                     break
 
-            # --- 3. MAPEAMENTO TEXTUAL DE PEDIDOS (MÉTODO ULTRA SEGURO) ---
+            # --- 3. MAPEAMENTO INTELIGENTE (VALOR + PEDIDO SEM PEGAR O ANO) ---
             banco_de_dados_viagens = []
             linhas_v = txt_viagens_consolidado.split("\n")
             
@@ -89,12 +87,10 @@ if arquivo_fatura and arquivos_viagens:
             ultimo_loc_valido = None
             
             for lv in linhas_v:
-                # Localizador (6 dígitos de letras e números)
                 loc_m = re.search(r'\b([A-Z0-9]{6})\b', lv)
                 if loc_m and not loc_m.group(1).isdigit(): 
-                    ultimo_loc_valido = loc_m.group(1).upper()
+                    ultimo_loc_valido = loc_m.group(1)
                 
-                # Busca números de pedido (4 a 7 dígitos) ignorando anos vigentes
                 todos_numeros = re.findall(r'\b(\d{4,7})\b', lv)
                 for num in todos_numeros:
                     if num in ["2025", "2026", "2027", "0226"]:
@@ -103,23 +99,24 @@ if arquivo_fatura and arquivos_viagens:
                         ultimo_pedido_valido = num
                         break
                 
-                # Valores financeiros na linha
-                valores_na_linha = re.findall(r'(?:R\$\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})|(?:\s)(\d{1,3}\.\d{2})\b', lv)
-                for match_val in valores_na_linha:
-                    val_texto = match_val[0] if match_val[0] else match_val[1]
-                    v_puro = limpar_valor(val_texto)
+                valor_m = re.search(r'R\$\s*([\d\.,\s]+)', lv)
+                if valor_m:
+                    v_texto = valor_m.group(1).strip()
+                    valores_capturados = [v.strip() for v in re.split(r'\s+', v_texto) if v.strip()]
                     
-                    if v_puro > 0:
-                        banco_de_dados_viagens.append({
-                            "Loc": ultimo_loc_valido,
-                            "Pedido": ultimo_pedido_valido,
-                            "ValorPuro": v_puro
-                        })
+                    for v_individual in valores_capturados:
+                        v_puro = limpar_valor(v_individual)
+                        if v_puro > 0:
+                            banco_de_dados_viagens.append({
+                                "Loc": ultimo_loc_valido,
+                                "Pedido": ultimo_pedido_valido,
+                                "ValorPuro": v_puro
+                            })
             
             # --- 4. PROCESSANDO OS LANÇAMENTOS EXCLUSIVOS DA PESSOA ---
             final_dados = []
             
-            for linha in linhas_fatura:
+            for linha in linhas_da_pessoa:
                 if "TOTAL" in linha.upper() or "CARTÃO" in linha.upper():
                     continue
                     
@@ -131,33 +128,16 @@ if arquivo_fatura and arquivos_viagens:
                     valor_fatura_puro = limpar_valor(valor_fatura)
                     
                     loc_m = re.search(r'\b([A-Z0-9]{6})\b', linha)
-                    loc_fatura = loc_m.group(1).upper() if loc_m else None
+                    loc_fatura = loc_m.group(1) if loc_m else None
                     
                     descricao = linha.strip()[:40]
                     pedido_encontrado = "PENDENTE"
                     
-                    # Batimento Inteligente de Contingência
-                    # 1ª Tentativa: Localizador exato
-                    if loc_fatura:
-                        for p in banco_de_dados_viagens:
-                            if p['Loc'] == loc_fatura:
-                                pedido_encontrado = p['Pedido']
-                                break
+                    for p in banco_de_dados_viagens:
+                        if (loc_fatura and p['Loc'] and loc_fatura == p['Loc']) or (abs(valor_fatura_puro - p['ValorPuro']) < 0.20):
+                            pedido_encontrado = p['Pedido']
+                            break
                     
-                    # 2ª Tentativa: Por aproximação de valor exato
-                    if pedido_encontrado == "PENDENTE":
-                        for p in banco_de_dados_viagens:
-                            if abs(valor_fatura_puro - p['ValorPuro']) < 0.20:
-                                pedido_encontrado = p['Pedido']
-                                break
-                                
-                    # 3ª Tentativa: Hospedagens (Expedia/Airbnb/Hotéis) com taxas adicionadas na fatura
-                    if pedido_encontrado == "PENDENTE" and any(h in descricao.upper() for h in ["EXPEDIA", "HOTEL", "AIRBNB"]):
-                        for p in banco_de_dados_viagens:
-                            if abs(valor_fatura_puro - p['ValorPuro']) < 55.00 and p['Pedido'] != "N/A":
-                                pedido_encontrado = p['Pedido']
-                                break
-
                     valor_exibicao = valor_fatura if ',' in valor_fatura and len(valor_fatura.split(',')[1]) == 2 else f"{valor_fatura}0"
                     final_dados.append([data_m.group(1), descricao, valor_exibicao, pedido_encontrado])
 
