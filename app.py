@@ -1,4 +1,5 @@
 import pypdf
+import pdfplumber
 import pandas as pd
 import re
 import io
@@ -6,6 +7,7 @@ import streamlit as st
 from fpdf import FPDF
 
 def ler_pdf_bytes(conteudo_bytes):
+    """Lê a fatura (texto corrido)"""
     text = ""
     try:
         reader = pypdf.PdfReader(io.BytesIO(conteudo_bytes))
@@ -13,13 +15,39 @@ def ler_pdf_bytes(conteudo_bytes):
             text += page.extract_text() + "\n"
         return text
     except Exception as e:
-        st.error(f"Erro ao ler PDF: {e}")
+        st.error(f"Erro ao ler PDF da fatura: {e}")
         return ""
+
+def extrair_tabelas_reais(conteudo_bytes):
+    """Lê as planilhas/relatórios usando inteligência de grade (pdfplumber) para células mescladas"""
+    dados_mapeados = []
+    try:
+        with pdfplumber.open(io.BytesIO(conteudo_bytes)) as pdf:
+            for pagina in pdf.pages:
+                # Extrai a tabela respeitando linhas e colunas reais
+                tabela = pagina.extract_table({
+                    "vertical_strategy": "lines",
+                    "horizontal_strategy": "lines",
+                    "snap_tolerance": 3,
+                })
+                
+                if not tabela:
+                    # Tenta extração textual de contingência caso não haja linhas visíveis
+                    tabela = pagina.extract_table()
+                    
+                if tabela:
+                    df = pd.DataFrame(tabela)
+                    # Remove linhas totalmente vazias
+                    df.dropna(how='all', inplace=True)
+                    dados_mapeados.append(df)
+    except Exception as e:
+        st.error(f"Erro ao processar estrutura da planilha: {e}")
+    return dados_mapeados
 
 def limpar_valor(valor_str):
     if not valor_str:
         return 0.0
-    dado_limpo = re.sub(r'[^\d,.]', '', valor_str)
+    dado_limpo = re.sub(r'[^\d,.]', '', str(valor_str))
     if ',' in dado_limpo and '.' in dado_limpo:
         dado_limpo = dado_limpo.replace('.', '').replace(',', '.')
     elif ',' in dado_limpo:
@@ -30,14 +58,14 @@ def limpar_valor(valor_str):
         return 0.0
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Conciliador Universal", page_icon="💳", layout="centered")
+st.set_page_config(page_title="Conciliador de Precisão", page_icon="🧮", layout="centered")
 
-st.title("💳 Conciliador de Cartão por Funcionário")
-st.markdown("Faça o upload da Fatura e de qualquer Relatório/Planilha em PDF para conciliar.")
+st.title("🧮 Conciliador de Precisão Estruturado")
+st.markdown("Sistema baseado em leitura de grades para prevenção de erros de cruzamento.")
 
 arquivo_fatura = st.file_uploader("1. Faça o upload da Fatura do Cartão (PDF)", type=["pdf"])
 arquivos_viagens = st.file_uploader(
-    "2. Faça o upload dos Relatórios de Pedidos / Planilhas (PDF)", 
+    "2. Faça o upload das Planilhas / Relatórios de Pedidos (PDF)", 
     type=["pdf"], 
     accept_multiple_files=True
 )
@@ -46,9 +74,10 @@ if arquivo_fatura and arquivos_viagens:
     
     txt_fatura = ler_pdf_bytes(arquivo_fatura.getvalue())
     
-    txt_viagens_consolidado = ""
+    # Processa todas as planilhas extraindo matrizes de tabelas reais
+    tabelas_planilhas = []
     for arq_viagem in arquivos_viagens:
-        txt_viagens_consolidado += ler_pdf_bytes(arq_viagem.getvalue()) + "\n"
+        tabelas_planilhas.extend(extrair_tabelas_reais(arq_viagem.getvalue()))
 
     # --- 1. DETECTAR OS NOMES DISPONÍVEIS NA FATURA ---
     nomes_fatura = sorted(list(set(re.findall(r'(?:Total\s+para|para)\s+([A-Z\s]{4,30})', txt_fatura, re.IGNORECASE))))
@@ -79,65 +108,57 @@ if arquivo_fatura and arquivos_viagens:
                     capturando = False
                     break
 
-            # --- 3. MAPEAMENTO MAPA DE CONTEXTO (MÉTODO ULTRA ROBUSTO) ---
+            # --- 3. PROCURAR COLUNAS DE VALOR E PEDIDO DINAMICAMENTE NAS MATRIZES ---
             banco_de_dados_viagens = []
-            linhas_v = txt_viagens_consolidado.split("\n")
             
-            # Varredura inteligente baseada em blocos e proximidade de linhas vizinhas
-            for idx, lv in enumerate(linhas_v):
-                # Coleta possíveis números de pedidos (4 a 7 dígitos) ignorando anos
-                pedidos_na_linha = [num for num in re.findall(r'\b(\d{4,7})\b', lv) if num not in ["2025", "2026", "2027", "0226"]]
-                # Coleta valores financeiros explícitos na linha
-                valores_na_linha = [limpar_valor(v) for v in re.findall(r'R\$\s*([\d\.,\s]+)', lv)]
-                # Localizadores de 6 dígitos
-                loc_m = re.search(r'\b([A-Z0-9]{6})\b', lv)
-                loc_linha = loc_m.group(1) if (loc_m and not loc_m.group(1).isdigit()) else None
+            for df in tabelas_planilhas:
+                col_pedido_idx = None
+                col_valor_idx = None
+                col_loc_idx = None
                 
-                if pedidos_na_linha:
-                    pedido_atual = pedidos_na_linha[0]
+                # Passo 1: Descobrir o índice das colunas pelos cabeçalhos mapeados
+                for linha_idx, linha in df.iterrows():
+                    linha_txt = [str(celula).upper() for celula in linha]
                     
-                    # Se achou o pedido, busca valores na linha atual e nas 2 linhas anteriores/posteriores (Trata Taxas Ocultas)
-                    contexto_valores = []
-                    for offset in [-2, -1, 0, 1, 2]:
-                        if 0 <= idx + offset < len(linhas_v):
-                            encontrados = re.findall(r'(?:R\$\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})', linhas_v[idx + offset])
-                            contexto_valores.extend([limpar_valor(ev) for ev in encontrados])
-                    
-                    # Remove duplicados mantendo valores válidos
-                    contexto_valores = list(set(contexto_valores))
-                    
-                    # Salva o pedido mapeado para cada um desses valores do bloco contextual
-                    for val_puro in contexto_valores:
-                        if val_puro > 0:
-                            banco_de_dados_viagens.append({
-                                "Loc": loc_linha,
-                                "Pedido": pedido_atual,
-                                "ValorPuro": val_puro
-                            })
+                    for idx, celula in enumerate(linha_txt):
+                        if any(termo in celula for termo in ["PEDIDO", "INTINE", "SERVIÇO"]) and not col_pedido_idx:
+                            col_pedido_idx = idx
+                        if any(termo in celula for termo in ["VALOR", "TOTAL", "PAGO"]) and not col_valor_idx:
+                            col_valor_idx = idx
+                        if any(termo in celula for termo in ["LOCALIZADOR", "LOC"]) and not col_loc_idx:
+                            col_loc_idx = idx
                             
-                            # Adiciona variações comuns de taxas (Soma de diárias + 10% ou taxas fixas estimadas)
-                            banco_de_dados_viagens.append({
-                                "Loc": loc_linha,
-                                "Pedido": pedido_atual,
-                                "ValorPuro": round(val_puro * 2, 2) # Caso o faturado seja ida+volta ou 2 diárias juntas
-                            })
+                    if col_pedido_idx is not None or col_valor_idx is not None:
+                        break # Achou o cabeçalho da tabela, pode começar a ler os dados abaixo
                 
-                # Coleta alternativa caso o valor esteja na linha mas o pedido esteja em cima/baixo
-                if valores_na_linha:
-                    for val_puro in valores_na_linha:
-                        # Varre vizinhos em busca de algum pedido para dar o match
-                        pedido_vizinho = "N/A"
-                        for offset in [-2, -1, 0, 1, 2]:
-                            if 0 <= idx + offset < len(linhas_v):
-                                nums_vizinhos = [n for n in re.findall(r'\b(\d{4,7})\b', linhas_v[idx + offset]) if n not in ["2025", "2026", "2027", "0226"]]
-                                if nums_vizinhos:
-                                    pedido_vizinho = nums_vizinhos[0]
-                                    break
+                # Se não achou cabeçalho claro, assume posições padrão (chute técnico seguro baseado nas colunas comuns)
+                if col_valor_idx is None: col_valor_idx = df.shape[1] - 1 if df.shape[1] > 0 else 0
+                if col_pedido_idx is None: col_pedido_idx = df.shape[1] - 2 if df.shape[1] > 1 else 0
+                
+                # Passo 2: Extrair os dados estritamente coordenados por célula
+                for idx, row in df.iterrows():
+                    val_celula = str(row[col_valor_idx]) if col_valor_idx < len(row) else ""
+                    ped_celula = str(row[col_pedido_idx]) if col_pedido_idx < len(row) else ""
+                    loc_celula = str(row[col_loc_idx]) if (col_loc_idx is not None and col_loc_idx < len(row)) else ""
+                    
+                    v_puro = limpar_valor(val_celula)
+                    
+                    # Limpa o número do pedido capturado na célula (deve ter de 3 a 7 dígitos e não ser o ano corrente)
+                    ped_limpo = "N/A"
+                    ped_match = re.search(r'\b(\d{3,7})\b', ped_celula)
+                    if ped_match and ped_match.group(1) not in ["2025", "2026", "2027", "0226"]:
+                        ped_limpo = ped_match.group(1)
                         
+                    loc_limpo = None
+                    loc_match = re.search(r'\b([A-Z0-9]{6})\b', loc_celula.upper())
+                    if loc_match and not loc_match.group(1).isdigit():
+                        loc_limpo = loc_match.group(1)
+                    
+                    if v_puro > 0:
                         banco_de_dados_viagens.append({
-                            "Loc": loc_linha,
-                            "Pedido": pedido_vizinho,
-                            "ValorPuro": val_puro
+                            "Loc": loc_limpo,
+                            "Pedido": ped_limpo,
+                            "ValorPuro": v_puro
                         })
 
             # --- 4. PROCESSANDO OS LANÇAMENTOS EXCLUSIVOS DA PESSOA ---
@@ -160,31 +181,20 @@ if arquivo_fatura and arquivos_viagens:
                     descricao = linha.strip()[:40]
                     pedido_encontrado = "PENDENTE"
                     
-                    # 1ª Tentativa: Match exato ou por aproximação de valores do banco estendido
+                    # Comparação precisa baseada em dados de célula
                     for p in banco_de_dados_viagens:
-                        if (loc_fatura and p['Loc'] and loc_fatura == p['Loc']) or (abs(valor_fatura_puro - p['ValorPuro']) < 0.20):
+                        if loc_fatura and p['Loc'] and loc_fatura == p['Loc']:
                             pedido_encontrado = p['Pedido']
                             break
+                        # Margem flexível de corte para taxas agregadas em faturas de hotéis/hospedagem (até R$ 55,00 de diferença de ISS/Taxa)
+                        elif abs(valor_fatura_puro - p['ValorPuro']) < 55.00:
+                            if "EXPEDIA" in descricao.upper() or "HOTEL" in descricao.upper() or "AIRBNB" in descricao.upper():
+                                pedido_encontrado = p['Pedido']
+                                break
+                            elif abs(valor_fatura_puro - p['ValorPuro']) < 0.20:
+                                pedido_encontrado = p['Pedido']
+                                break
                     
-                    # 2ª Tentativa (O Pulo do Gato para Hospedagens): 
-                    # Se continuou pendente, mas na descrição da fatura ou da linha tiver algum valor que somado dê o faturado,
-                    # ou se acharmos um pedido cuja soma de parcelas/diárias do contexto feche com o valor da fatura.
-                    if pedido_encontrado == "PENDENTE":
-                        for p in banco_de_dados_viagens:
-                            # Se o valor da fatura contiver parte do valor contextual (ex: 513 inclui o escopo do bloco do pedido)
-                            # ou se a descrição do hotel bater com palavras chave próximas
-                            if p['Pedido'] != "N/A" and p['Pedido'] != "PENDENTE":
-                                # Se houver cruzamento indireto pela proximidade estrutural do arquivo
-                                if loc_fatura and p['Loc'] and (loc_fatura in linha or p['Loc'] in txt_viagens_consolidado):
-                                    pedido_encontrado = p['Pedido']
-                                    break
-                                # Match de contingência para valores compostos (como o 513,00) que aparecem acoplados a pedidos vizinhos
-                                if abs((p['ValorPuro'] * 2) - valor_fatura_puro) < 30.00 or abs(p['ValorPuro'] - valor_fatura_puro) < 30.00:
-                                    # Se a descrição do hotel na planilha estiver contida na descrição da fatura (Ex: Expedia)
-                                    if "EXPEDIA" in descricao.upper() or "HOTEL" in descricao.upper():
-                                        pedido_encontrado = p['Pedido']
-                                        break
-
                     valor_exibicao = valor_fatura if ',' in valor_fatura and len(valor_fatura.split(',')[1]) == 2 else f"{valor_fatura}0"
                     final_dados.append([data_m.group(1), descricao, valor_exibicao, pedido_encontrado])
 
