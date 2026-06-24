@@ -19,7 +19,7 @@ def ler_pdf_bytes(conteudo_bytes):
 def limpar_valor(valor_str):
     if not valor_str:
         return 0.0
-    dado_limpo = re.sub(r'[^\d,.]', '', str(valor_str))
+    dado_limpo = re.sub(r'[^\d,.]', '', valor_str)
     if ',' in dado_limpo and '.' in dado_limpo:
         dado_limpo = dado_limpo.replace('.', '').replace(',', '.')
     elif ',' in dado_limpo:
@@ -79,34 +79,40 @@ if arquivo_fatura and arquivos_viagens:
                     capturando = False
                     break
 
-            # --- 3. MAPEAMENTO TEXTUAL DE CONTEXTO ---
+            # --- 3. MAPEAMENTO INTELIGENTE (VALOR + PEDIDO SEM PEGAR O ANO) ---
             banco_de_dados_viagens = []
             linhas_v = txt_viagens_consolidado.split("\n")
             
+            ultimo_pedido_valido = "N/A"
+            ultimo_loc_valido = None
+            
             for lv in linhas_v:
-                # Procura Localizador (6 dígitos alfanuméricos)
                 loc_m = re.search(r'\b([A-Z0-9]{6})\b', lv)
-                loc_linha = loc_m.group(1).upper() if (loc_m and not loc_m.group(1).isdigit()) else None
+                if loc_m and not loc_m.group(1).isdigit(): 
+                    ultimo_loc_valido = loc_m.group(1)
                 
-                # Procura por números de pedido (4 a 7 dígitos) garantindo que NÃO SEJA o ano 2026
-                pedidos_na_linha = [num for num in re.findall(r'\b(\d{4,7})\b', lv) if num not in ["2025", "2026", "2027", "0226"]]
-                pedido_linha = pedidos_na_linha[0] if pedidos_na_linha else "N/A"
+                todos_numeros = re.findall(r'\b(\d{4,7})\b', lv)
+                for num in todos_numeros:
+                    if num in ["2025", "2026", "2027", "0226"]:
+                        continue
+                    else:
+                        ultimo_pedido_valido = num
+                        break
                 
-                # Procura valores monetários na linha
-                valores_na_linha = re.findall(r'(?:R\$\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})|(?:\s)(\d{1,3}\.\d{2})\b', lv)
-                
-                for match_val in valores_na_linha:
-                    # Junta os grupos do regex para pegar o valor limpo
-                    val_texto = match_val[0] if match_val[0] else match_val[1]
-                    v_puro = limpar_valor(val_texto)
+                valor_m = re.search(r'R\$\s*([\d\.,\s]+)', lv)
+                if valor_m:
+                    v_texto = valor_m.group(1).strip()
+                    valores_capturados = [v.strip() for v in re.split(r'\s+', v_texto) if v.strip()]
                     
-                    if v_puro > 0:
-                        banco_de_dados_viagens.append({
-                            "Loc": loc_linha,
-                            "Pedido": pedido_linha,
-                            "ValorPuro": v_puro
-                        })
-
+                    for v_individual in valores_capturados:
+                        v_puro = limpar_valor(v_individual)
+                        if v_puro > 0:
+                            banco_de_dados_viagens.append({
+                                "Loc": ultimo_loc_valido,
+                                "Pedido": ultimo_pedido_valido,
+                                "ValorPuro": v_puro
+                            })
+            
             # --- 4. PROCESSANDO OS LANÇAMENTOS EXCLUSIVOS DA PESSOA ---
             final_dados = []
             
@@ -122,34 +128,16 @@ if arquivo_fatura and arquivos_viagens:
                     valor_fatura_puro = limpar_valor(valor_fatura)
                     
                     loc_m = re.search(r'\b([A-Z0-9]{6})\b', linha)
-                    loc_fatura = loc_m.group(1).upper() if loc_m else None
+                    loc_fatura = loc_m.group(1) if loc_m else None
                     
                     descricao = linha.strip()[:40]
                     pedido_encontrado = "PENDENTE"
                     
-                    # REGRA DE OURO PARA O BATIMENTO:
-                    # 1ª Tentativa: Se a linha da fatura tem um Localizador, busca estritamente pelo Localizador correspondente no banco
-                    if loc_fatura:
-                        for p in banco_de_dados_viagens:
-                            if p['Loc'] == loc_fatura:
-                                pedido_encontrado = p['Pedido']
-                                break
+                    for p in banco_de_dados_viagens:
+                        if (loc_fatura and p['Loc'] and loc_fatura == p['Loc']) or (abs(valor_fatura_puro - p['ValorPuro']) < 0.20):
+                            pedido_encontrado = p['Pedido']
+                            break
                     
-                    # 2ª Tentativa: Se não achou por localizador (ou não tem localizador na linha), busca por proximidade de valor monetário
-                    if pedido_encontrado == "PENDENTE":
-                        for p in banco_de_dados_viagens:
-                            if abs(valor_fatura_puro - p['ValorPuro']) < 0.20:
-                                pedido_encontrado = p['Pedido']
-                                break
-                                
-                    # 3ª Tentativa (Contingência para hospedagens com taxas agregadas ex: Expedia/Airbnb):
-                    if pedido_encontrado == "PENDENTE" and any(h in descricao.upper() for h in ["EXPEDIA", "HOTEL", "AIRBNB"]):
-                        for p in banco_de_dados_viagens:
-                            # Se o valor faturado for próximo do valor base da hospedagem (tolerando até R$ 55,00 de taxas invisíveis)
-                            if abs(valor_fatura_puro - p['ValorPuro']) < 55.00 and p['Pedido'] != "N/A":
-                                pedido_encontrado = p['Pedido']
-                                break
-
                     valor_exibicao = valor_fatura if ',' in valor_fatura and len(valor_fatura.split(',')[1]) == 2 else f"{valor_fatura}0"
                     final_dados.append([data_m.group(1), descricao, valor_exibicao, pedido_encontrado])
 
