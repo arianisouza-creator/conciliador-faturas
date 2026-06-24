@@ -16,19 +16,32 @@ def ler_pdf_bytes(conteudo_bytes):
         st.error(f"Erro ao ler PDF: {e}")
         return ""
 
+def limpar_valor(valor_str):
+    """Transforma qualquer string de valor (R$ 1.234,56 ou 1234.56) em um número float puro para comparação"""
+    if not valor_str:
+        return 0.0
+    # Remove símbolos, espaços e troca pontos por nada, e vírgula por ponto (ou vice-versa)
+    dado_limpo = re.sub(r'[^\d,.]', '', valor_str)
+    if ',' in dado_limpo and '.' in dado_limpo:
+        dado_limpo = dado_limpo.replace('.', '').replace(',', '.')
+    elif ',' in dado_limpo:
+        dado_limpo = dado_limpo.replace(',', '.')
+    try:
+        return float(dado_limpo)
+    except:
+        return 0.0
+
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Conciliador por Funcionário", page_icon="💳", layout="centered")
 
 st.title("💳 Conciliador de Cartão por Funcionário")
 st.markdown("Faça o upload da Fatura e do Relatório de Viagens para conciliar seus pedidos.")
 
-# Upload dos arquivos
 arquivo_fatura = st.file_uploader("1. Faça o upload da Fatura do Cartão (PDF)", type=["pdf"])
 arquivo_viagens = st.file_uploader("2. Faça o upload do Relatório de Viagens/Pedidos (PDF)", type=["pdf"])
 
 if arquivo_fatura and arquivo_viagens:
     
-    # Processa os PDFs diretamente
     txt_fatura = ler_pdf_bytes(arquivo_fatura.getvalue())
     txt_viagens = ler_pdf_bytes(arquivo_viagens.getvalue())
 
@@ -39,7 +52,6 @@ if arquivo_fatura and arquivo_viagens:
     if not nomes_limpos:
         st.error("❌ Não conseguimos identificar os nomes dos funcionários na fatura. Verifique o arquivo.")
     else:
-        # Interface para o usuário escolher quem ele é
         nome_selecionado = st.selectbox("👤 Quem é você? Selecione seu nome:", ["Clique para selecionar..."] + nomes_limpos)
 
         if nome_selecionado != "Clique para selecionar...":
@@ -62,21 +74,26 @@ if arquivo_fatura and arquivo_viagens:
                     capturando = False
                     break
 
-            # --- 3. MAPEANDO PEDIDOS DO RELATÓRIO DE VIAGENS ---
+            # --- 3. MAPEANDO PEDIDOS DO RELATÓRIO DE VIAGENS (MÉTODO ROBUSTO) ---
             pedidos_viagens = []
             linhas_v = txt_viagens.split("\n")
             
             for lv in linhas_v:
                 loc_m = re.search(r'\b([A-Z0-9]{6})\b', lv)
-                valor_m = re.search(r'R\$\s*([\d\.,]+)', lv)
+                valor_m = re.search(r'R\$\s*([\d\.,\s]+)', lv)
                 pedido_m = re.search(r'\b(\d{4,7})\b', lv)
                 
                 if valor_m:
-                    pedidos_viagens.append({
-                        "Loc": loc_m.group(1) if loc_m else None,
-                        "Pedido": pedido_m.group(1) if pedido_m else "N/A",
-                        "Valor": valor_m.group(1).strip()
-                    })
+                    v_texto = valor_m.group(1).strip()
+                    # Trata casos onde múltiplos valores aparecem na mesma célula de texto
+                    valores_capturados = [v.strip() for v in re.split(r'\s+', v_texto) if v.strip()]
+                    
+                    for v_individual in valores_capturados:
+                        pedidos_viagens.append({
+                            "Loc": loc_m.group(1) if loc_m else None,
+                            "Pedido": pedido_m.group(1) if pedido_m else "N/A",
+                            "ValorPuro": limpar_valor(v_individual)
+                        })
 
             # --- 4. PROCESSANDO OS LANÇAMENTOS EXCLUSIVOS DA PESSOA ---
             final_dados = []
@@ -93,11 +110,13 @@ if arquivo_fatura and arquivo_viagens:
                     loc_fatura = loc_m.group(1) if loc_m else None
                     valor_fatura = valor_m.group(1)
                     
+                    valor_fatura_puro = limpar_valor(valor_fatura)
                     descricao = linha.strip()[:40]
                     pedido_encontrado = "PENDENTE"
                     
+                    # Cruzamento por valor numérico puro ou Localizador
                     for p in pedidos_viagens:
-                        if (loc_fatura and loc_fatura == p['Loc']) or (valor_fatura == p['Valor']):
+                        if (loc_fatura and loc_fatura == p['Loc']) or (abs(valor_fatura_puro - p['ValorPuro']) < 0.05):
                             pedido_encontrado = p['Pedido']
                             break
                     
@@ -108,8 +127,6 @@ if arquivo_fatura and arquivo_viagens:
             
             if final_dados:
                 df_visualizacao = pd.DataFrame(final_dados, columns=["Data", "Descrição da Fatura", "Valor", "Nº Pedido Encontrado"])
-                
-                # Exibe a tabela estática para evitar bugs visuais de sincronia do navegador
                 st.table(df_visualizacao)
                 
                 # --- GERADOR DO PDF DE SAÍDA ---
@@ -119,7 +136,6 @@ if arquivo_fatura and arquivo_viagens:
                 pdf.cell(190, 10, f"Relatorio de Conciliacao - {nome_selecionado}", ln=True, align='C')
                 pdf.ln(5)
 
-                # Cabeçalho da tabela no PDF
                 pdf.set_font("Arial", "B", 10)
                 pdf.set_fill_color(230, 230, 230)
                 pdf.cell(20, 10, "Data", 1, 0, 'C', True)
@@ -127,16 +143,13 @@ if arquivo_fatura and arquivo_viagens:
                 pdf.cell(35, 10, "Valor", 1, 0, 'C', True)
                 pdf.cell(50, 10, "Numero Pedido", 1, 1, 'C', True)
 
-                # Conteúdo da tabela no PDF
                 pdf.set_font("Arial", "", 9)
                 for r in final_dados:
                     pdf.cell(20, 10, r[0], 1, 0, 'C')
                     pdf.cell(85, 10, r[1][:45], 1, 0, 'L')
                     pdf.cell(35, 10, r[2], 1, 0, 'C')
-                    
                     if r[3] == "PENDENTE":
                         pdf.set_text_color(255, 0, 0)
-                    
                     pdf.cell(50, 10, r[3], 1, 1, 'C')
                     pdf.set_text_color(0, 0, 0)
 
@@ -149,4 +162,4 @@ if arquivo_fatura and arquivo_viagens:
                     mime="application/pdf"
                 )
             else:
-                st.warning("Nenhum lançamento de compras com formato Data + Valor foi localizado no seu bloco da fatura.")
+                st.warning("Nenhum lançamento de compras válido foi localizado para este funcionário.")
