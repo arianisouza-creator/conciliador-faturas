@@ -17,9 +17,9 @@ def ler_pdf_bytes(conteudo_bytes):
         return ""
 
 def limpar_valor(valor_str):
-    if not valor_str:
+    if not valor_str or pd.isna(valor_str):
         return 0.0
-    dado_limpo = re.sub(r'[^\d,.]', '', valor_str)
+    dado_limpo = re.sub(r'[^\d,.]', '', str(valor_str))
     if ',' in dado_limpo and '.' in dado_limpo:
         dado_limpo = dado_limpo.replace('.', '').replace(',', '.')
     elif ',' in dado_limpo:
@@ -30,25 +30,24 @@ def limpar_valor(valor_str):
         return 0.0
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Conciliador Universal", page_icon="💳", layout="centered")
+st.set_page_config(page_title="Conciliador Inteligente", page_icon="💳", layout="centered")
 
 st.title("💳 Conciliador de Cartão por Funcionário")
-st.markdown("Faça o upload da Fatura e de qualquer Relatório/Planilha em PDF para conciliar.")
+st.markdown("Envie a fatura em PDF e cole os dados do seu Excel para conciliar sem erros.")
 
+# 1. Upload da Fatura em PDF
 arquivo_fatura = st.file_uploader("1. Faça o upload da Fatura do Cartão (PDF)", type=["pdf"])
-arquivos_viagens = st.file_uploader(
-    "2. Faça o upload dos Relatórios de Pedidos / Planilhas (PDF)", 
-    type=["pdf"], 
-    accept_multiple_files=True
+
+# 2. Caixa de Texto para dar Ctrl+V do Excel
+dados_colados = st.text_area(
+    "2. Selecione as células no seu Excel, copie (Ctrl+C) e cole (Ctrl+V) aqui embaixo:",
+    height=250,
+    placeholder="Cole aqui as linhas e colunas da sua planilha..."
 )
 
-if arquivo_fatura and arquivos_viagens:
+if arquivo_fatura and dados_colados.strip():
     
     txt_fatura = ler_pdf_bytes(arquivo_fatura.getvalue())
-    
-    txt_viagens_consolidado = ""
-    for arq_viagem in arquivos_viagens:
-        txt_viagens_consolidado += ler_pdf_bytes(arq_viagem.getvalue()) + "\n"
 
     # --- 1. DETECTAR OS NOMES DISPONÍVEIS NA FATURA ---
     nomes_fatura = sorted(list(set(re.findall(r'(?:Total\s+para|para)\s+([A-Z\s]{4,30})', txt_fatura, re.IGNORECASE))))
@@ -79,40 +78,62 @@ if arquivo_fatura and arquivos_viagens:
                     capturando = False
                     break
 
-            # --- 3. MAPEAMENTO INTELIGENTE (VALOR + PEDIDO SEM PEGAR O ANO) ---
+            # --- 3. TRANSFORMAR O CTRL+V EM TABELA REAL ---
             banco_de_dados_viagens = []
-            linhas_v = txt_viagens_consolidado.split("\n")
-            
-            ultimo_pedido_valido = "N/A"
-            ultimo_loc_valido = None
-            
-            for lv in linhas_v:
-                loc_m = re.search(r'\b([A-Z0-9]{6})\b', lv)
-                if loc_m and not loc_m.group(1).isdigit(): 
-                    ultimo_loc_valido = loc_m.group(1)
+            try:
+                # O Excel separa colunas por Tabulação (\t) ao copiar. O Pandas entende isso perfeitamente!
+                df_planilha = pd.read_csv(io.StringIO(dados_colados), sep="\t", header=None)
                 
-                todos_numeros = re.findall(r'\b(\d{4,7})\b', lv)
-                for num in todos_numeros:
-                    if num in ["2025", "2026", "2027", "0226"]:
-                        continue
-                    else:
-                        ultimo_pedido_valido = num
-                        break
+                # Preenche células vazias resultantes de mesclagem na vertical (Copia o valor de cima para baixo)
+                df_planilha.ffill(axis=0, inplace=True)
                 
-                valor_m = re.search(r'R\$\s*([\d\.,\s]+)', lv)
-                if valor_m:
-                    v_texto = valor_m.group(1).strip()
-                    valores_capturados = [v.strip() for v in re.split(r'\s+', v_texto) if v.strip()]
+                col_pedido_idx = None
+                col_valor_idx = None
+                col_loc_idx = None
+                
+                # Varre as primeiras linhas para achar onde estão as colunas corretas
+                for linha_idx, row in df_planilha.head(5).iterrows():
+                    for col_idx, celula in enumerate(row):
+                        celula_txt = str(celula).upper()
+                        if any(t in celula_txt for t in ["PEDIDO", "INTINE", "SERVIÇO"]) and col_pedido_idx is None:
+                            col_pedido_idx = col_idx
+                        if any(t in celula_txt for t in ["VALOR", "TOTAL", "PAGO"]) and col_valor_idx is None:
+                            col_valor_idx = col_idx
+                        if any(t in celula_txt for t in ["LOCALIZADOR", "LOC"]) and col_loc_idx is None:
+                            col_loc_idx = col_idx
+
+                # Se não achar por nome, chuta as colunas finais
+                if col_valor_idx is None: col_valor_idx = df_planilha.shape[1] - 1
+                if col_pedido_idx is None: col_pedido_idx = df_planilha.shape[1] - 2 if df_planilha.shape[1] > 1 else 0
+
+                # Organiza os dados encontrados no banco virtual
+                for _, row in df_planilha.iterrows():
+                    val_cru = row[col_valor_idx] if col_valor_idx < len(row) else ""
+                    ped_cru = row[col_pedido_idx] if col_pedido_idx < len(row) else ""
+                    loc_cru = row[col_loc_idx] if (col_loc_idx is not None and col_loc_idx < len(row)) else ""
                     
-                    for v_individual in valores_capturados:
-                        v_puro = limpar_valor(v_individual)
-                        if v_puro > 0:
-                            banco_de_dados_viagens.append({
-                                "Loc": ultimo_loc_valido,
-                                "Pedido": ultimo_pedido_valido,
-                                "ValorPuro": v_puro
-                            })
-            
+                    v_puro = limpar_valor(val_cru)
+                    
+                    # Filtra o pedido tirando anos correntes
+                    ped_limpo = "N/A"
+                    ped_match = re.search(r'\b(\d{3,7})\b', str(ped_cru))
+                    if ped_match and ped_match.group(1) not in ["2025", "2026", "2027", "0226"]:
+                        ped_limpo = ped_match.group(1)
+                        
+                    loc_limpo = None
+                    loc_match = re.search(r'\b([A-Z0-9]{6})\b', str(loc_cru).upper())
+                    if loc_match and not loc_match.group(1).isdigit():
+                        loc_limpo = loc_match.group(1)
+                        
+                    if v_puro > 0:
+                        banco_de_dados_viagens.append({
+                            "Loc": loc_limpo,
+                            "Pedido": ped_limpo,
+                            "ValorPuro": v_puro
+                        })
+            except Exception as e:
+                st.error(f"Erro ao processar as células coladas: {e}")
+
             # --- 4. PROCESSANDO OS LANÇAMENTOS EXCLUSIVOS DA PESSOA ---
             final_dados = []
             
@@ -128,13 +149,21 @@ if arquivo_fatura and arquivos_viagens:
                     valor_fatura_puro = limpar_valor(valor_fatura)
                     
                     loc_m = re.search(r'\b([A-Z0-9]{6})\b', linha)
-                    loc_fatura = loc_m.group(1) if loc_m else None
+                    loc_fatura = loc_m.group(1).upper() if loc_m else None
                     
                     descricao = linha.strip()[:40]
                     pedido_encontrado = "PENDENTE"
                     
+                    # Realiza o batimento
                     for p in banco_de_dados_viagens:
-                        if (loc_fatura and p['Loc'] and loc_fatura == p['Loc']) or (abs(valor_fatura_puro - p['ValorPuro']) < 0.20):
+                        if loc_fatura and p['Loc'] and loc_fatura == p['Loc']:
+                            pedido_encontrado = p['Pedido']
+                            break
+                        # Tolerância elástica automática para faturas de hotéis/hospedagens (taxas extras de até R$ 55)
+                        elif abs(valor_fatura_puro - p['ValorPuro']) < 55.00 and any(h in descricao.upper() for h in ["EXPEDIA", "HOTEL", "AIRBNB"]):
+                            pedido_encontrado = p['Pedido']
+                            break
+                        elif abs(valor_fatura_puro - p['ValorPuro']) < 0.20:
                             pedido_encontrado = p['Pedido']
                             break
                     
