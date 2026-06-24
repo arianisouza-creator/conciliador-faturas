@@ -67,7 +67,7 @@ if arquivo_fatura and dados_colados.strip():
             
             primeiro_nome = nome_selecionado.split()[0]
             
-            for linha in linhas_fatura:
+            for linha in lines_fatura:
                 if primeiro_nome in linha.upper() and ("CARTÃO" in linha.upper() or len(linha.strip()) < 40):
                     capturando = True
                 
@@ -78,61 +78,54 @@ if arquivo_fatura and dados_colados.strip():
                     capturando = False
                     break
 
-            # --- 3. TRANSFORMAR O CTRL+V EM TABELA REAL ---
+            # --- 3. PROCESSAMENTO TOLERANTE DO CTRL+V (MÉTODO ANTI-TOKENIZAÇÃO) ---
             banco_de_dados_viagens = []
-            try:
-                # O Excel separa colunas por Tabulação (\t) ao copiar. O Pandas entende isso perfeitamente!
-                df_planilha = pd.read_csv(io.StringIO(dados_colados), sep="\t", header=None)
+            
+            # Quebra o bloco colado em linhas puras
+            linhas_coladas = [l.strip() for l in dados_colados.split("\n") if l.strip()]
+            
+            # Variáveis para guardar o histórico das células mescladas
+            ultimo_pedido_valido = "N/A"
+            ultimo_loc_valido = None
+            
+            for linha_c in linhas_coladas:
+                # O Excel separa colunas por TABULAÇÃO (\t) ao copiar
+                colunas = linha_c.split("\t")
                 
-                # Preenche células vazias resultantes de mesclagem na vertical (Copia o valor de cima para baixo)
-                df_planilha.ffill(axis=0, inplace=True)
+                ped_celula = ""
+                val_celula = ""
+                loc_celula = ""
                 
-                col_pedido_idx = None
-                col_valor_idx = None
-                col_loc_idx = None
-                
-                # Varre as primeiras linhas para achar onde estão as colunas corretas
-                for linha_idx, row in df_planilha.head(5).iterrows():
-                    for col_idx, celula in enumerate(row):
-                        celula_txt = str(celula).upper()
-                        if any(t in celula_txt for t in ["PEDIDO", "INTINE", "SERVIÇO"]) and col_pedido_idx is None:
-                            col_pedido_idx = col_idx
-                        if any(t in celula_txt for t in ["VALOR", "TOTAL", "PAGO"]) and col_valor_idx is None:
-                            col_valor_idx = col_idx
-                        if any(t in celula_txt for t in ["LOCALIZADOR", "LOC"]) and col_loc_idx is None:
-                            col_loc_idx = col_idx
-
-                # Se não achar por nome, chuta as colunas finais
-                if col_valor_idx is None: col_valor_idx = df_planilha.shape[1] - 1
-                if col_pedido_idx is None: col_pedido_idx = df_planilha.shape[1] - 2 if df_planilha.shape[1] > 1 else 0
-
-                # Organiza os dados encontrados no banco virtual
-                for _, row in df_planilha.iterrows():
-                    val_cru = row[col_valor_idx] if col_valor_idx < len(row) else ""
-                    ped_cru = row[col_pedido_idx] if col_pedido_idx < len(row) else ""
-                    loc_cru = row[col_loc_idx] if (col_loc_idx is not None and col_loc_idx < len(row)) else ""
+                # Identifica dinamicamente o que é valor e o que é pedido pelo conteúdo da célula
+                for celula in colunas:
+                    celula_limpa = str(celula).strip()
                     
-                    v_puro = limpar_valor(val_cru)
-                    
-                    # Filtra o pedido tirando anos correntes
-                    ped_limpo = "N/A"
-                    ped_match = re.search(r'\b(\d{3,7})\b', str(ped_cru))
-                    if ped_match and ped_match.group(1) not in ["2025", "2026", "2027", "0226"]:
-                        ped_limpo = ped_match.group(1)
+                    # 1. Se tem "R$" ou formato de dinheiro com vírgula nas últimas posições, é o VALOR
+                    if "R$" in celula_limpa or re.search(r'\d+,\d{2}$', celula_limpa):
+                        val_celula = celula_limpa
                         
-                    loc_limpo = None
-                    loc_match = re.search(r'\b([A-Z0-9]{6})\b', str(loc_cru).upper())
-                    if loc_match and not loc_match.group(1).isdigit():
-                        loc_limpo = loc_match.group(1)
-                        
-                    if v_puro > 0:
-                        banco_de_dados_viagens.append({
-                            "Loc": loc_limpo,
-                            "Pedido": ped_limpo,
-                            "ValorPuro": v_puro
-                        })
-            except Exception as e:
-                st.error(f"Erro ao processar as células coladas: {e}")
+                    # 2. Se tem de 4 a 7 dígitos e não é o ano 2026/2025, é o PEDIDO
+                    elif celula_limpa.isdigit() and len(celula_limpa) >= 4 and len(celula_limpa) <= 7:
+                        if celula_limpa not in ["2025", "2026", "2027", "0226"]:
+                            ped_celula = celula_limpa
+                            
+                    # 3. Se tem exatamente 6 dígitos de letras e números, é o LOCALIZADOR
+                    elif len(celula_limpa) == 6 and re.match(r'^[A-Z0-9]{6}$', celula_limpa.upper()) and not celula_limpa.isdigit():
+                        loc_celula = celula_limpa
+                
+                # Inteligência de Memória para Células Mescladas:
+                # Se a linha atual veio sem pedido/localizador (célula mesclada no Excel), ela herda o último válido
+                if ped_celula: ultimo_pedido_valido = ped_celula
+                if loc_celula: ultimo_loc_valido = loc_celula.upper()
+                
+                v_puro = limpar_valor(val_celula)
+                
+                if v_puro > 0:
+                    banco_de_dados_viagens.append({
+                        "Loc": ultimo_loc_valido,
+                        "Pedido": ultimo_pedido_valido,
+                        "ValorPuro": v_puro
+                    })
 
             # --- 4. PROCESSANDO OS LANÇAMENTOS EXCLUSIVOS DA PESSOA ---
             final_dados = []
