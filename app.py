@@ -33,15 +33,26 @@ def limpar_valor(valor_str):
 st.set_page_config(page_title="Conciliador por Funcionário", page_icon="💳", layout="centered")
 
 st.title("💳 Conciliador de Cartão por Funcionário")
-st.markdown("Faça o upload da Fatura e do Relatório de Viagens para conciliar seus pedidos.")
+st.markdown("Faça o upload da Fatura e de **um ou mais** Relatórios de Viagens para conciliar.")
 
+# Upload dos arquivos
 arquivo_fatura = st.file_uploader("1. Faça o upload da Fatura do Cartão (PDF)", type=["pdf"])
-arquivo_viagens = st.file_uploader("2. Faça o upload do Relatório de Viagens/Pedidos (PDF)", type=["pdf"])
 
-if arquivo_fatura and arquivo_viagens:
+# Campo alterado para aceitar múltiplos arquivos de viagens ao mesmo tempo
+arquivos_viagens = st.file_uploader(
+    "2. Faça o upload dos Relatórios de Viagens/Pedidos (PDF) - Aceita vários arquivos", 
+    type=["pdf"], 
+    accept_multiple_files=True
+)
+
+if arquivo_fatura and arquivos_viagens:
     
     txt_fatura = ler_pdf_bytes(arquivo_fatura.getvalue())
-    txt_viagens = ler_pdf_bytes(arquivo_viagens.getvalue())
+    
+    # Processa e junta o texto de TODOS os relatórios de viagens enviados
+    txt_viagens_consolidado = ""
+    for arq_viagem in arquivos_viagens:
+        txt_viagens_consolidado += ler_pdf_bytes(arq_viagem.getvalue()) + "\n"
 
     # --- 1. DETECTAR OS NOMES DISPONÍVEIS NA FATURA ---
     nomes_fatura = sorted(list(set(re.findall(r'(?:Total\s+para|para)\s+([A-Z\s]{4,30})', txt_fatura, re.IGNORECASE))))
@@ -72,9 +83,9 @@ if arquivo_fatura and arquivo_viagens:
                     capturando = False
                     break
 
-            # --- 3. MAPEANDO PEDIDOS DO RELATÓRIO DE VIAGENS (COM INTELIGÊNCIA DE BLOCO) ---
+            # --- 3. MAPEANDO PEDIDOS DO TEXTO CONSOLIDADO DOS RELATÓRIOS ---
             banco_de_dados_viagens = []
-            linhas_v = txt_viagens.split("\n")
+            linhas_v = txt_viagens_consolidado.split("\n")
             
             ultimo_loc = None
             ultimo_pedido = "N/A"
@@ -106,12 +117,9 @@ if arquivo_fatura and arquivo_viagens:
                     continue
                     
                 data_m = re.search(r'(\d{2}/\d{2})', linha)
-                
-                # Procura por qualquer valor monetário na linha (ex: 1.619,62 ou 1.619,6)
                 valores_na_linha = re.findall(r'(\d{1,3}(?:\.\d{3})*,\d{1,2})', linha)
                 
                 if data_m and valores_na_linha:
-                    # Pega o maior valor encontrado na linha (geralmente o valor correto da coluna)
                     valor_fatura = max(valores_na_linha, key=len)
                     valor_fatura_puro = limpar_valor(valor_fatura)
                     
@@ -121,18 +129,14 @@ if arquivo_fatura and arquivo_viagens:
                     descricao = linha.strip()[:40]
                     pedido_encontrado = "PENDENTE"
                     
-                    # Busca flexível multidirecional
                     for p in banco_de_dados_viagens:
-                        # 1. Se os localizadores forem iguais, é o match perfeito
                         if loc_fatura and p['Loc'] and loc_fatura == p['Loc']:
                             pedido_encontrado = p['Pedido'] if p['Pedido'] != "N/A (Em Branco)" else f"S/ Nº (Loc: {p['Loc']})"
                             break
-                        # 2. Se a diferença do valor for de centavos (decorrente de cortes de texto), aceita o match
                         elif abs(valor_fatura_puro - p['ValorPuro']) < 0.10:
                             pedido_encontrado = p['Pedido'] if p['Pedido'] != "N/A (Em Branco)" else f"S/ Nº (Loc: {p['Loc']})"
                             break
                     
-                    # Formata visualmente o valor exibido caso venha cortado
                     valor_exibicao = valor_fatura if ',' in valor_fatura and len(valor_fatura.split(',')[1]) == 2 else f"{valor_fatura}0"
 
                     final_dados.append([data_m.group(1), descricao, valor_exibicao, pedido_encontrado])
