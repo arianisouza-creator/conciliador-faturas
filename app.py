@@ -293,6 +293,23 @@ def normalizar_data(data: str) -> str:
     return match.group(1) if match else (data or "").strip()
 
 
+def eh_ano_ou_data(valor: str) -> bool:
+    if not valor:
+        return False
+    texto = str(valor).strip()
+    return bool(re.fullmatch(r"20\d{2}", texto))
+
+
+def selecionar_pedido_candidato(candidatos: List[str]) -> Optional[str]:
+    for candidato in candidatos:
+        if not candidato:
+            continue
+        if candidato.isdigit() and len(candidato) == 4 and eh_ano_ou_data(candidato):
+            continue
+        return candidato
+    return None
+
+
 def ler_pdf_bytes(conteudo_bytes: bytes) -> str:
     texto = []
     reader = pypdf.PdfReader(io.BytesIO(conteudo_bytes))
@@ -542,48 +559,57 @@ def extrair_referencia_hospedagem(texto: str, arquivo: str) -> List[ReferenciaPe
 
     texto_busca = ascii_fold(texto)
     padrao = re.compile(
-        r"(?:CARTAO|FATURADO)\s+"
-        r"(.*?)\s+"
-        r"(\d{2}/\d{2}(?:/\d{2,4})?)\s+"
-        r"(\d{2}/\d{2}(?:/\d{2,4})?)\s+"
-        r"(\d+)\s+"
-        r"R\$\s*([\d\.,]+)\s+"
-        r"R\$\s*([\d\.,]+)\s+"
-        r"R\$\s*([\d\.,]+)\s+"
-        r"(\d{4,7})",
+        r"(?P<desc>.*?)\s+"
+        r"(?P<checkin>\d{2}/\d{2}(?:/\d{2,4})?)\s+"
+        r"(?P<checkout>\d{2}/\d{2}(?:/\d{2,4})?)\s+"
+        r"(?P<dias>\d+)\s+"
+        r"R\$\s*(?P<diaria>[\d\.,]+)\s+"
+        r"R\$\s*(?P<total_diarias>[\d\.,]+)\s+"
+        r"R\$\s*(?P<valor>[\d\.,]+)\s+"
+        r"(?P<resto>(?:\d[\d\.\s-]*)?)",
         re.IGNORECASE | re.DOTALL,
     )
 
-    for match in padrao.finditer(texto_busca):
-        descricao = re.sub(r"\s+", " ", match.group(1)).strip()
+    segmentos = re.split(r"(?=(?:LMS|PORTO|STI|NEO|NN|CNPEM|NOVO NORDISK|ORCAMENTOS|FATURADO)\b)", texto_busca)
+    for segmento in segmentos:
+        segmento = re.sub(r"\s+", " ", segmento).strip()
+        if not segmento:
+            continue
+        if "R$" not in segmento or not re.search(r"\d{2}/\d{2}", segmento):
+            continue
+
+        match = padrao.search(segmento)
+        if not match:
+            continue
+
+        descricao = match.group("desc").strip()
         if "FUNCIONARIO HOTEL CIDADE" in descricao[:80]:
             continue
 
-        valor_texto = match.group(7)
+        valor_texto = match.group("valor")
         valor = moeda_para_decimal(valor_texto)
         if valor is None:
             continue
 
-        restante = texto_busca[match.end(7) :]
+        resto = match.group("resto")
         intine = None
         pedido = None
 
-        intine_match = re.search(r"\b(\d{10,15})\b", restante)
-        if intine_match:
-            intine = intine_match.group(1)
-            pos_intine = intine_match.end()
-            depois_intine = restante[pos_intine:]
-            pedido_match = re.search(r"\b(\d{4,7})\b", depois_intine)
-            if pedido_match:
-                pedido = pedido_match.group(1)
-        else:
-            pedido_match = re.search(r"\b(\d{4,7})\b(?=[^\d]*?(?:VISITA|EVENTO|VIAGEM|MOTIVO|$))", restante)
-            if pedido_match:
-                pedido = pedido_match.group(1)
-            else:
-                pedidos = re.findall(r"\b(\d{4,7})\b", restante)
-                if pedidos:
-                    pedido = pedidos[-1]
+        numeros = re.findall(r"\b\d{4,15}\b", resto)
+        if numeros:
+            for num in numeros:
+                if len(num) >= 10:
+                    intine = num
+                    continue
+                if eh_ano_ou_data(num):
+                    continue
+                pedido = num
+                break
+
+        if not pedido:
+            candidatos = re.findall(r"\b\d{4,7}\b", resto)
+            candidatos = [c for c in candidatos if not eh_ano_ou_data(c)]
+            pedido = selecionar_pedido_candidato(candidatos)
 
         if not pedido:
             continue
@@ -596,7 +622,7 @@ def extrair_referencia_hospedagem(texto: str, arquivo: str) -> List[ReferenciaPe
                 valor_texto=valor_texto,
                 valor=valor,
                 descricao=descricao[:180],
-                datas=[normalizar_data(match.group(2)), normalizar_data(match.group(3))],
+                datas=[normalizar_data(match.group("checkin")), normalizar_data(match.group("checkout"))],
                 intine=intine,
             )
         )
@@ -617,11 +643,15 @@ def extrair_referencia_portal(texto: str, arquivo: str) -> List[ReferenciaPedido
         if valor is None:
             continue
 
+        pedido = match.group(2)
+        if eh_ano_ou_data(pedido):
+            continue
+
         itens.append(
             ReferenciaPedido(
                 origem_arquivo=arquivo,
                 origem_tipo="portal",
-                pedido=match.group(2),
+                pedido=pedido,
                 valor_texto=match.group(3),
                 valor=valor,
                 descricao=match.group(0)[:180],
