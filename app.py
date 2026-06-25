@@ -9,6 +9,11 @@ import pandas as pd
 import pypdf
 
 try:
+    from fpdf import FPDF
+except ImportError:
+    FPDF = None
+
+try:
     import streamlit as st
 except ImportError:
     class _StreamlitFallback:
@@ -51,20 +56,152 @@ except ImportError:
         def download_button(self, *args, **kwargs):
             return None
 
+        def markdown(self, *args, **kwargs):
+            return None
+
         def stop(self):
             raise SystemExit
 
     st = _StreamlitFallback()
 
-try:
-    from fpdf import FPDF
-except ImportError:
-    FPDF = None
-
 
 st.set_page_config(page_title="Conciliador de Cartao", layout="wide")
 
 TOLERANCIA_VALOR = Decimal("0.20")
+
+CSS_APP = """
+<style>
+:root {
+    --mse: #e91e4f;
+    --dark: #1e293b;
+    --bg: #f1f5f9;
+    --surface: #ffffff;
+    --border: #111827;
+    --text: #1e293b;
+    --text-muted: #94a3b8;
+    --pendente: #facc15;
+    --estorno: #ef4444;
+    --duplicado: #3b82f6;
+}
+
+div.block-container {
+    padding-top: 1rem;
+    padding-bottom: 1.25rem;
+    max-width: 1600px;
+}
+
+.mse-topbar {
+    background: var(--dark);
+    color: white;
+    border-radius: 10px;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+}
+
+.mse-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 700;
+}
+
+.small-muted {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.summary-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin: 8px 0 16px 0;
+}
+
+.summary-card {
+    background: #fff;
+    border: 1px solid #dbe2ee;
+    border-radius: 10px;
+    padding: 10px 14px;
+    min-width: 140px;
+}
+
+.summary-label {
+    font-size: 12px;
+    color: #64748b;
+    margin-bottom: 2px;
+}
+
+.summary-value {
+    font-size: 18px;
+    font-weight: 700;
+    color: #0f172a;
+}
+
+.badge {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.badge-ok { background: #dcfce7; color: #166534; }
+.badge-pendente { background: #fef3c7; color: #92400e; }
+.badge-estorno { background: #fee2e2; color: #991b1b; }
+.badge-duplicado { background: #dbeafe; color: #1d4ed8; }
+
+.table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: white;
+}
+
+.mse-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.mse-table thead th {
+    background: #e5e7eb;
+    color: #0f172a;
+    border: 1px solid var(--border);
+    padding: 8px;
+    text-align: left;
+    font-weight: 700;
+}
+
+.mse-table tbody td {
+    border: 1px solid var(--border);
+    padding: 7px 8px;
+    vertical-align: top;
+}
+
+.mse-table tbody tr.row-estorno td {
+    background: #fee2e2 !important;
+    color: #b91c1c !important;
+}
+
+.mse-table tbody tr.row-pendente td {
+    background: #fef3c7 !important;
+    color: #92400e !important;
+}
+
+.mse-table tbody tr.row-duplicado td {
+    background: #dbeafe !important;
+    color: #1d4ed8 !important;
+}
+
+.mse-table tbody tr.row-ok td {
+    background: #ffffff !important;
+    color: #111827 !important;
+}
+</style>
+"""
 
 
 @dataclass
@@ -74,6 +211,7 @@ class LancamentoFatura:
     valor_texto: str
     valor: Decimal
     localizador: Optional[str] = None
+    bruto_texto: str = ""
 
 
 @dataclass
@@ -257,6 +395,7 @@ def extrair_lancamento_bloco(bloco: List[str]) -> Optional[LancamentoFatura]:
         valor_texto=valor_texto,
         valor=valor,
         localizador=extrair_localizador(texto_busca),
+        bruto_texto=texto_original,
     )
 
 
@@ -280,6 +419,7 @@ def extrair_lancamentos_fatura(texto_fatura: str, nome_titular: str) -> List[Lan
 
 def extrair_referencia_hospedagem(texto: str, arquivo: str) -> List[ReferenciaPedido]:
     itens = []
+
     texto_busca = ascii_fold(texto)
     padrao = re.compile(
         r"(?:CARTAO|FATURADO)\s+"
@@ -307,7 +447,6 @@ def extrair_referencia_hospedagem(texto: str, arquivo: str) -> List[ReferenciaPe
         restante = texto_busca[match.end(7):]
         intine = None
         pedido = None
-
         intine_match = re.search(r"\b(\d{10,15})\b\s+(\d{4,7})\b", restante)
         if intine_match:
             intine = intine_match.group(1)
@@ -400,6 +539,16 @@ def pontuar_correspondencia(lancamento: LancamentoFatura, referencia: Referencia
     return score
 
 
+def lancamento_e_estorno(lancamento: LancamentoFatura) -> bool:
+    bruto = ascii_fold(lancamento.bruto_texto)
+    if "-" in lancamento.bruto_texto:
+        if re.search(r"-\s*(?:R\$)?\s*%s\b" % re.escape(lancamento.valor_texto), bruto):
+            return True
+    if "ESTORNO" in bruto or "CANCEL" in bruto:
+        return True
+    return False
+
+
 def conciliar_lancamentos(
     lancamentos: List[LancamentoFatura],
     referencias: List[ReferenciaPedido],
@@ -407,6 +556,22 @@ def conciliar_lancamentos(
     resultado = []
 
     for lancamento in lancamentos:
+        if lancamento_e_estorno(lancamento):
+            resultado.append(
+                {
+                    "Data": lancamento.data,
+                    "Descricao": lancamento.descricao,
+                    "Localizador": lancamento.localizador or "",
+                    "Valor": lancamento.valor_texto,
+                    "Pedido": "ESTORNO",
+                    "Status": "ESTORNO",
+                    "Criterio": "ESTORNO",
+                    "Origem": "ESTORNO",
+                    "Tipo": "ESTORNO",
+                }
+            )
+            continue
+
         candidatos = []
         for ref in referencias:
             if abs(lancamento.valor - ref.valor) <= TOLERANCIA_VALOR:
@@ -415,6 +580,7 @@ def conciliar_lancamentos(
         escolhido = None
         criterio = ""
         status = "PENDENTE"
+        pedido_extra = ""
 
         if candidatos:
             pontuados = []
@@ -442,10 +608,13 @@ def conciliar_lancamentos(
             else:
                 status = "AMBIGUO"
                 criterio = "Valor duplicado"
+                pedido_extra = ", ".join(sorted({item[1].pedido for item in empatados}))
 
         pedido = escolhido.pedido if escolhido else ""
         origem = escolhido.origem_arquivo if escolhido else ""
         origem_tipo = escolhido.origem_tipo if escolhido else ""
+        if status == "AMBIGUO" and pedido_extra:
+            pedido = pedido_extra
 
         resultado.append(
             {
@@ -536,11 +705,36 @@ def gerar_pdf(resultado: List[Dict[str, str]]) -> bytes:
     return pdf.output(dest="S").encode("latin-1", "replace")
 
 
+def classe_linha(status: str) -> str:
+    if status == "ESTORNO":
+        return "row-estorno"
+    if status == "PENDENTE":
+        return "row-pendente"
+    if status == "AMBIGUO":
+        return "row-duplicado"
+    return "row-ok"
+
+
 def nome_arquivo_saida(nome: str, extensao: str) -> str:
     base = ascii_fold(nome).replace(" ", "_")
     base = re.sub(r"[^A-Z0-9_]+", "", base)
     return f"Conciliacao_{base}.{extensao}"
 
+
+st.markdown(CSS_APP, unsafe_allow_html=True)
+
+st.markdown(
+    """
+    <div class="mse-topbar">
+        <div class="mse-brand">
+            <span style="width:12px;height:12px;border-radius:999px;background:var(--mse);display:inline-block"></span>
+            <span>Conciliação Cartão</span>
+        </div>
+        <div class="small-muted">Modelo MSE</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 st.title("Conciliador de Cartao")
 st.write(
@@ -599,12 +793,27 @@ if arquivo_fatura:
         if resultado:
             st.subheader("Conciliacao")
             df_resultado = pd.DataFrame(resultado)
-            st.dataframe(df_resultado, use_container_width=True)
+
+            def estilo_linha(row):
+                status = str(row["Status"])
+                if status == "ESTORNO":
+                    return ["background-color: #fee2e2; color: #b91c1c;"] * len(row)
+                if status == "PENDENTE":
+                    return ["background-color: #fef3c7; color: #92400e;"] * len(row)
+                if status == "AMBIGUO":
+                    return ["background-color: #dbeafe; color: #1d4ed8;"] * len(row)
+                return ["background-color: #ffffff; color: #111827;"] * len(row)
+
+            st.dataframe(
+                df_resultado.style.apply(estilo_linha, axis=1),
+                use_container_width=True,
+            )
 
             pendentes = int((df_resultado["Status"] == "PENDENTE").sum())
             ambiguos = int((df_resultado["Status"] == "AMBIGUO").sum())
+            estornos = int((df_resultado["Status"] == "ESTORNO").sum())
             st.info(
-                f"Processados: {len(df_resultado)} | Pendentes: {pendentes} | Ambiguos: {ambiguos}"
+                f"Processados: {len(df_resultado)} | Estornos: {estornos} | Pendentes: {pendentes} | Ambiguos: {ambiguos}"
             )
 
             pdf_bytes = gerar_pdf(resultado)
