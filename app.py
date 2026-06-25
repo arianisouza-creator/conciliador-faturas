@@ -1,175 +1,637 @@
-import pypdf
-import pandas as pd
-import re
 import io
-import streamlit as st
-from fpdf import FPDF
+import re
+import unicodedata
+from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
+from typing import Dict, List, Optional
 
-def ler_pdf_bytes(conteudo_bytes):
-    text = ""
+import pandas as pd
+import pypdf
+
+try:
+    import streamlit as st
+except ImportError:
+    class _StreamlitFallback:
+        def set_page_config(self, *args, **kwargs):
+            return None
+
+        def title(self, *args, **kwargs):
+            return None
+
+        def write(self, *args, **kwargs):
+            return None
+
+        def file_uploader(self, *args, **kwargs):
+            return None
+
+        def selectbox(self, *args, **kwargs):
+            return None
+
+        def text_input(self, *args, **kwargs):
+            return ""
+
+        def button(self, *args, **kwargs):
+            return False
+
+        def subheader(self, *args, **kwargs):
+            return None
+
+        def dataframe(self, *args, **kwargs):
+            return None
+
+        def info(self, *args, **kwargs):
+            return None
+
+        def warning(self, *args, **kwargs):
+            return None
+
+        def error(self, *args, **kwargs):
+            return None
+
+        def download_button(self, *args, **kwargs):
+            return None
+
+        def stop(self):
+            raise SystemExit
+
+    st = _StreamlitFallback()
+
+try:
+    from fpdf import FPDF
+except ImportError:
+    FPDF = None
+
+
+st.set_page_config(page_title="Conciliador de Cartao", layout="wide")
+
+TOLERANCIA_VALOR = Decimal("0.20")
+
+
+@dataclass
+class LancamentoFatura:
+    data: str
+    descricao: str
+    valor_texto: str
+    valor: Decimal
+    localizador: Optional[str] = None
+
+
+@dataclass
+class ReferenciaPedido:
+    origem_arquivo: str
+    origem_tipo: str
+    pedido: str
+    valor_texto: str
+    valor: Decimal
+    descricao: str
+    datas: List[str] = field(default_factory=list)
+    localizador: Optional[str] = None
+    intine: Optional[str] = None
+
+
+def ascii_fold(texto: str) -> str:
+    if not texto:
+        return ""
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = texto.encode("ascii", "ignore").decode("ascii")
+    texto = texto.replace("\xa0", " ")
+    texto = re.sub(r"\s+", " ", texto)
+    return texto.strip().upper()
+
+
+def moeda_para_decimal(valor: str) -> Optional[Decimal]:
+    if not valor:
+        return None
     try:
-        reader = pypdf.PdfReader(io.BytesIO(conteudo_bytes))
-        for page in reader.pages:
-            text += page.extract_text() + "\n"
-        return text
-    except Exception as e:
-        st.error(f"Erro ao ler PDF: {e}")
+        normalizado = valor.strip().replace(".", "").replace(",", ".")
+        return Decimal(normalizado)
+    except (InvalidOperation, AttributeError):
+        return None
+
+
+def normalizar_data(data: str) -> str:
+    match = re.match(r"(\d{2}/\d{2})", data or "")
+    return match.group(1) if match else (data or "").strip()
+
+
+def ler_pdf_bytes(conteudo_bytes: bytes) -> str:
+    texto = []
+    reader = pypdf.PdfReader(io.BytesIO(conteudo_bytes))
+    for pagina in reader.pages:
+        texto.append(pagina.extract_text() or "")
+    return "\n".join(texto)
+
+
+def salvar_nome_titular(cand: str) -> str:
+    cand = ascii_fold(cand)
+    cand = re.sub(r"^(TOTAL PARA|CARTAO|CARTAO:)\s+", "", cand).strip()
+    return cand
+
+
+def detectar_titulares(texto_fatura: str) -> List[str]:
+    candidatos = []
+    for linha in texto_fatura.splitlines():
+        linha_busca = ascii_fold(linha)
+        m1 = re.match(
+            r"^([A-Z][A-Z ]{3,80}?)\s+CARTAO\s+\d{4}\s+XXXX\s+XXXX\s+\d{4}\b",
+            linha_busca,
+        )
+        nome = None
+        if m1:
+            nome = salvar_nome_titular(m1.group(1))
+
+        if nome and len(nome.split()) >= 2:
+            candidatos.append(nome)
+
+    vistos = []
+    for nome in candidatos:
+        if nome not in vistos:
+            vistos.append(nome)
+    return vistos
+
+
+def localizar_secao_titular(texto_fatura: str, nome_titular: str) -> str:
+    linhas = texto_fatura.splitlines()
+    nome_busca = ascii_fold(nome_titular)
+
+    cabecalhos = []
+    for idx, linha in enumerate(linhas):
+        linha_busca = ascii_fold(linha)
+        if re.search(
+            r"^[A-Z][A-Z ]{3,80}\s+CARTAO\s+\d{4}\s+XXXX\s+XXXX\s+\d{4}\b",
+            linha_busca,
+        ):
+            cabecalhos.append(idx)
+
+    inicio = None
+    for idx in cabecalhos:
+        linha_busca = ascii_fold(linhas[idx])
+        if nome_busca in linha_busca:
+            inicio = idx
+            break
+
+    if inicio is None:
         return ""
 
-def limpar_valor(valor_str):
-    if not valor_str:
-        return 0.0
-    dado_limpo = re.sub(r'[^\d,.]', '', valor_str)
-    if ',' in dado_limpo and '.' in dado_limpo:
-        dado_limpo = dado_limpo.replace('.', '').replace(',', '.')
-    elif ',' in dado_limpo:
-        dado_limpo = dado_limpo.replace(',', '.')
-    try:
-        return float(dado_limpo)
-    except:
-        return 0.0
+    fim = len(linhas)
+    for idx in cabecalhos:
+        if idx > inicio:
+            fim = idx
+            break
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Conciliador por Funcionário", page_icon="💳", layout="centered")
+    secao = linhas[inicio:fim]
+    return "\n".join(secao)
 
-st.title("💳 Conciliador de Cartão por Funcionário")
-st.markdown("Faça o upload da Fatura e de **um ou mais** Relatórios de Viagens para conciliar.")
 
-arquivo_fatura = st.file_uploader("1. Faça o upload da Fatura do Cartão (PDF)", type=["pdf"])
-arquivos_viagens = st.file_uploader(
-    "2. Faça o upload do(s) Relatório(s) de Viagens/Pedidos (PDF)", 
-    type=["pdf"], 
-    accept_multiple_files=True
+def agrupar_blocos_transacao(linhas: List[str]) -> List[List[str]]:
+    blocos = []
+    atual = []
+    for linha in linhas:
+        linha_limpa = linha.strip()
+        if not linha_limpa:
+            continue
+
+        linha_busca = ascii_fold(linha_limpa)
+        if linha_busca.startswith("TOTAL PARA"):
+            break
+
+        if re.match(r"^\d{2}/\d{2}\b", linha_busca):
+            if atual:
+                blocos.append(atual)
+            atual = [linha_limpa]
+        elif atual:
+            atual.append(linha_limpa)
+
+    if atual:
+        blocos.append(atual)
+    return blocos
+
+
+def extrair_localizador(texto_busca: str) -> Optional[str]:
+    excluidos = {
+        "CARTAO",
+        "TOTAL",
+        "PARA",
+        "PAGTO",
+        "POR",
+        "DEB",
+        "EM",
+        "CC",
+        "CUSTO",
+        "TRANS",
+        "EXTERIOR",
+        "IOF",
+    }
+    tokens = re.findall(r"\b[A-Z0-9]{6}\b", texto_busca)
+    for token in reversed(tokens):
+        if token not in excluidos and not token.isdigit():
+            return token
+    return None
+
+
+def extrair_lancamento_bloco(bloco: List[str]) -> Optional[LancamentoFatura]:
+    texto_original = " ".join(bloco)
+    texto_busca = ascii_fold(texto_original)
+
+    data_match = re.search(r"\b(\d{2}/\d{2})\b", texto_busca)
+    if not data_match:
+        return None
+
+    valores = re.findall(r"\b\d{1,3}(?:\.\d{3})*,\d{2}\b", texto_busca)
+    if not valores:
+        return None
+
+    valor_texto = valores[-1]
+    valor = moeda_para_decimal(valor_texto)
+    if valor is None:
+        return None
+
+    descricao = texto_original
+    descricao = re.sub(r"\b\d{1,3}(?:\.\d{3})*,\d{2}\b", "", descricao)
+    descricao = re.sub(r"\b\d{2}/\d{2}\b", "", descricao, count=1)
+    descricao = re.sub(r"\s+", " ", descricao).strip()
+
+    return LancamentoFatura(
+        data=data_match.group(1),
+        descricao=descricao[:140],
+        valor_texto=valor_texto,
+        valor=valor,
+        localizador=extrair_localizador(texto_busca),
+    )
+
+
+def extrair_lancamentos_fatura(texto_fatura: str, nome_titular: str) -> List[LancamentoFatura]:
+    secao = localizar_secao_titular(texto_fatura, nome_titular)
+    if not secao:
+        return []
+
+    linhas = secao.splitlines()
+    if linhas:
+        linhas = linhas[1:]
+
+    blocos = agrupar_blocos_transacao(linhas)
+    lancamentos = []
+    for bloco in blocos:
+        lancamento = extrair_lancamento_bloco(bloco)
+        if lancamento:
+            lancamentos.append(lancamento)
+    return lancamentos
+
+
+def extrair_referencia_hospedagem(texto: str, arquivo: str) -> List[ReferenciaPedido]:
+    itens = []
+    texto_busca = ascii_fold(texto)
+    padrao = re.compile(
+        r"(?:CARTAO|FATURADO)\s+"
+        r"(.*?)\s+"
+        r"(\d{2}/\d{2}(?:/\d{2,4})?)\s+"
+        r"(\d{2}/\d{2}(?:/\d{2,4})?)\s+"
+        r"(\d+)\s+"
+        r"R\$\s*([\d\.,]+)\s+"
+        r"R\$\s*([\d\.,]+)\s+"
+        r"R\$\s*([\d\.,]+)\s+"
+        r"(\d{4,7})",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    for match in padrao.finditer(texto_busca):
+        descricao = re.sub(r"\s+", " ", match.group(1)).strip()
+        if "FUNCIONARIO HOTEL CIDADE" in descricao[:80]:
+            continue
+
+        valor_texto = match.group(7)
+        valor = moeda_para_decimal(valor_texto)
+        if valor is None:
+            continue
+
+        restante = texto_busca[match.end(7):]
+        intine = None
+        pedido = None
+
+        intine_match = re.search(r"\b(\d{10,15})\b\s+(\d{4,7})\b", restante)
+        if intine_match:
+            intine = intine_match.group(1)
+            pedido = intine_match.group(2)
+        else:
+            intine_match = re.search(r"\b(\d{10,15})\b", restante)
+            if intine_match:
+                intine = intine_match.group(1)
+
+            pedidos = re.findall(r"\b(\d{4,7})\b", restante)
+            if pedidos:
+                pedido = pedidos[-1]
+
+        if not pedido:
+            continue
+
+        itens.append(
+            ReferenciaPedido(
+                origem_arquivo=arquivo,
+                origem_tipo="hospedagem",
+                pedido=pedido,
+                valor_texto=valor_texto,
+                valor=valor,
+                descricao=descricao[:180],
+                datas=[normalizar_data(match.group(2)), normalizar_data(match.group(3))],
+                intine=intine,
+            )
+        )
+
+    return itens
+
+
+def extrair_referencia_portal(texto: str, arquivo: str) -> List[ReferenciaPedido]:
+    texto_busca = ascii_fold(texto)
+    padrao = re.compile(
+        r"\b([A-Z0-9]{6})\b.*?\b(\d{4,7})\b.*?R\$\s*([\d\.,]+)",
+        re.IGNORECASE,
+    )
+    itens = []
+
+    for match in padrao.finditer(texto_busca):
+        valor = moeda_para_decimal(match.group(3))
+        if valor is None:
+            continue
+
+        itens.append(
+            ReferenciaPedido(
+                origem_arquivo=arquivo,
+                origem_tipo="portal",
+                pedido=match.group(2),
+                valor_texto=match.group(3),
+                valor=valor,
+                descricao=match.group(0)[:180],
+                localizador=match.group(1).upper(),
+            )
+        )
+
+    return itens
+
+
+def extrair_referencias_arquivo(nome_arquivo: str, conteudo_bytes: bytes) -> List[ReferenciaPedido]:
+    texto = ler_pdf_bytes(conteudo_bytes)
+    if not texto.strip():
+        return []
+
+    itens = extrair_referencia_hospedagem(texto, nome_arquivo)
+    if itens:
+        return itens
+
+    return extrair_referencia_portal(texto, nome_arquivo)
+
+
+def pontuar_correspondencia(lancamento: LancamentoFatura, referencia: ReferenciaPedido) -> Decimal:
+    score = Decimal("0")
+
+    if lancamento.localizador and referencia.localizador and lancamento.localizador == referencia.localizador:
+        score += Decimal("100")
+
+    diff = abs(lancamento.valor - referencia.valor)
+    if diff == Decimal("0"):
+        score += Decimal("50")
+    elif diff <= TOLERANCIA_VALOR:
+        score += Decimal("30")
+
+    data_lancamento = normalizar_data(lancamento.data)
+    datas_ref = {normalizar_data(d) for d in referencia.datas if d}
+    if data_lancamento and data_lancamento in datas_ref:
+        score += Decimal("20")
+
+    return score
+
+
+def conciliar_lancamentos(
+    lancamentos: List[LancamentoFatura],
+    referencias: List[ReferenciaPedido],
+) -> List[Dict[str, str]]:
+    resultado = []
+
+    for lancamento in lancamentos:
+        candidatos = []
+        for ref in referencias:
+            if abs(lancamento.valor - ref.valor) <= TOLERANCIA_VALOR:
+                candidatos.append(ref)
+
+        escolhido = None
+        criterio = ""
+        status = "PENDENTE"
+
+        if candidatos:
+            pontuados = []
+            for ref in candidatos:
+                score = pontuar_correspondencia(lancamento, ref)
+                pontuados.append((score, ref))
+
+            pontuados.sort(key=lambda item: (item[0], item[1].pedido), reverse=True)
+            melhor_score, melhor_ref = pontuados[0]
+            empatados = [item for item in pontuados if item[0] == melhor_score]
+
+            if len(empatados) == 1 and melhor_score > 0:
+                escolhido = melhor_ref
+                if lancamento.localizador and melhor_ref.localizador and lancamento.localizador == melhor_ref.localizador:
+                    criterio = "Localizador"
+                elif normalizar_data(lancamento.data) in {normalizar_data(d) for d in melhor_ref.datas if d}:
+                    criterio = "Valor + Data"
+                else:
+                    criterio = "Valor"
+                status = "OK"
+            elif len(empatados) == 1:
+                escolhido = melhor_ref
+                criterio = "Valor"
+                status = "OK"
+            else:
+                status = "AMBIGUO"
+                criterio = "Valor duplicado"
+
+        pedido = escolhido.pedido if escolhido else ""
+        origem = escolhido.origem_arquivo if escolhido else ""
+        origem_tipo = escolhido.origem_tipo if escolhido else ""
+
+        resultado.append(
+            {
+                "Data": lancamento.data,
+                "Descricao": lancamento.descricao,
+                "Localizador": lancamento.localizador or "",
+                "Valor": lancamento.valor_texto,
+                "Pedido": pedido or status,
+                "Status": status,
+                "Criterio": criterio,
+                "Origem": origem,
+                "Tipo": origem_tipo,
+            }
+        )
+
+    return resultado
+
+
+def gerar_excel(resultado: List[Dict[str, str]]) -> bytes:
+    df = pd.DataFrame(resultado)
+    saida = io.BytesIO()
+    with pd.ExcelWriter(saida, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Conciliacao")
+    return saida.getvalue()
+
+
+def gerar_csv(resultado: List[Dict[str, str]]) -> bytes:
+    df = pd.DataFrame(resultado)
+    return df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+
+
+def gerar_pdf(resultado: List[Dict[str, str]]) -> bytes:
+    if FPDF is None:
+        return b""
+
+    pdf = FPDF(orientation="L", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=10)
+    pdf.add_page()
+
+    pdf.set_font("Arial", "B", 13)
+    pdf.cell(0, 8, "Relatorio de Conciliacao", ln=True, align="C")
+    pdf.ln(2)
+
+    colunas = [
+        ("Data", 20),
+        ("Descricao", 96),
+        ("Localizador", 24),
+        ("Valor", 24),
+        ("Pedido", 28),
+        ("Status", 20),
+        ("Criterio", 30),
+        ("Origem", 40),
+    ]
+
+    pdf.set_font("Arial", "B", 8)
+    pdf.set_fill_color(230, 230, 230)
+    for titulo, largura in colunas:
+        pdf.cell(largura, 7, titulo, 1, 0, "C", True)
+    pdf.ln()
+
+    pdf.set_font("Arial", "", 8)
+    for linha in resultado:
+        status = linha["Status"]
+        if status == "PENDENTE":
+            pdf.set_text_color(200, 0, 0)
+        elif status == "AMBIGUO":
+            pdf.set_text_color(180, 110, 0)
+        else:
+            pdf.set_text_color(0, 0, 0)
+
+        valores = [
+            linha["Data"],
+            linha["Descricao"],
+            linha["Localizador"],
+            linha["Valor"],
+            linha["Pedido"],
+            linha["Status"],
+            linha["Criterio"],
+            linha["Origem"],
+        ]
+
+        for (titulo, largura), valor in zip(colunas, valores):
+            texto = ascii_fold(str(valor))[:80]
+            pdf.cell(largura, 7, texto, 1)
+        pdf.ln()
+
+    pdf.set_text_color(0, 0, 0)
+    return pdf.output(dest="S").encode("latin-1", "replace")
+
+
+def nome_arquivo_saida(nome: str, extensao: str) -> str:
+    base = ascii_fold(nome).replace(" ", "_")
+    base = re.sub(r"[^A-Z0-9_]+", "", base)
+    return f"Conciliacao_{base}.{extensao}"
+
+
+st.title("Conciliador de Cartao")
+st.write(
+    "Envie a fatura e um ou mais PDFs de apoio para extrair os lancamentos e cruzar os valores."
 )
 
-if arquivo_fatura and arquivos_viagens:
-    
-    txt_fatura = ler_pdf_bytes(arquivo_fatura.getvalue())
-    
-    # Processa todos os relatórios de viagens
-    txt_viagens_consolidado = ""
-    for arq_viagem in arquivos_viagens:
-        txt_viagens_consolidado += ler_pdf_bytes(arq_viagem.getvalue()) + "\n"
+arquivo_fatura = st.file_uploader("Fatura em PDF", type=["pdf"], key="fatura")
+arquivos_ref = st.file_uploader(
+    "Planilhas/relatorios em PDF", type=["pdf"], accept_multiple_files=True, key="refs"
+)
 
-    # --- 1. DETECTAR OS NOMES DISPONÍVEIS NA FATURA ---
-    nomes_fatura = sorted(list(set(re.findall(r'(?:Total\s+para|para)\s+([A-Z\s]{4,30})', txt_fatura, re.IGNORECASE))))
-    nomes_limpos = [nome.strip().upper() for nome in nomes_fatura if len(nome.strip()) > 3]
+if arquivo_fatura:
+    texto_fatura = ler_pdf_bytes(arquivo_fatura.getvalue())
+    titulares = detectar_titulares(texto_fatura)
 
-    if not nomes_limpos:
-        st.error("❌ Não conseguimos identificar os nomes dos funcionários na fatura. Verifique o arquivo.")
+    if titulares:
+        titular = st.selectbox("Selecionar titular", titulares)
     else:
-        nome_selecionado = st.selectbox("👤 Quem é você? Selecione seu nome:", ["Clique para selecionar..."] + nomes_limpos)
+        titular = st.text_input("Nome do titular na fatura", value="ARIANI DE SOUZA")
 
-        if nome_selecionado != "Clique para selecionar...":
-            
-            # --- 2. EXTRAIR APENAS O TRECHO DA FATURA DA PESSOA SELECIONADA ---
-            linhas_fatura = txt_fatura.split("\n")
-            linhas_da_pessoa = []
-            capturando = False
-            
-            primeiro_nome = nome_selecionado.split()[0]
-            
-            for linha in linhas_fatura:
-                if primeiro_nome in linha.upper() and ("CARTÃO" in linha.upper() or len(linha.strip()) < 40):
-                    capturando = True
-                
-                if capturando:
-                    linhas_da_pessoa.append(linha)
-                    
-                if "TOTAL" in linha.upper() and primeiro_nome in linha.upper():
-                    capturando = False
-                    break
+    if st.button("Processar"):
+        lancamentos = extrair_lancamentos_fatura(texto_fatura, titular)
 
-            # --- 3. CAPTURA ALINHADA DE PEDIDOS E VALORES (MÉTODO DA COLUNA) ---
-            banco_de_dados_viagens = []
-            
-            # Captura TODOS os números de pedidos (4 a 7 dígitos) e TODOS os valores (R$) do documento de viagens
-            todos_pedidos = re.findall(r'\b(\d{4,7})\b', txt_viagens_consolidado)
-            todos_valores = re.findall(r'R\$\s*([\d\.,]+)', txt_viagens_consolidado)
-            todos_locs = re.findall(r'\b([A-Z0-9]{6})\b', txt_viagens_consolidado)
+        referencias = []
+        if arquivos_ref:
+            for arquivo in arquivos_ref:
+                referencias.extend(
+                    extrair_referencias_arquivo(arquivo.name, arquivo.getvalue())
+                )
 
-            # Sincroniza as listas por posição (Mapeamento Direto)
-            total_itens = max(len(todos_valores), len(todos_pedidos))
-            
-            for i in range(total_itens):
-                pedido = todos_pedidos[i] if i < len(todos_pedidos) else "N/A"
-                valor_str = todos_valores[i] if i < len(todos_valores) else "0,00"
-                loc = todos_locs[i] if i < len(todos_locs) else None
-                
-                banco_de_dados_viagens.append({
-                    "Loc": loc,
-                    "Pedido": pedido,
-                    "ValorPuro": limpar_valor(valor_str)
-                })
-            
-            # --- 4. PROCESSANDO OS LANÇAMENTOS EXCLUSIVOS DA PESSOA ---
-            final_dados = []
-            
-            for linha in linhas_da_pessoa:
-                if "TOTAL" in linha.upper() or "CARTÃO" in linha.upper():
-                    continue
-                    
-                data_m = re.search(r'(\d{2}/\d{2})', linha)
-                valores_na_linha = re.findall(r'(\d{1,3}(?:\.\d{3})*,\d{1,2})', linha)
-                
-                if data_m and valores_na_linha:
-                    valor_fatura = max(valores_na_linha, key=len)
-                    valor_fatura_puro = limpar_valor(valor_fatura)
-                    
-                    loc_m = re.search(r'\b([A-Z0-9]{6})\b', linha)
-                    loc_fatura = loc_m.group(1) if loc_m else None
-                    
-                    descricao = linha.strip()[:40]
-                    pedido_encontrado = "PENDENTE"
-                    
-                    # Procura no nosso banco sincronizado
-                    for p in banco_de_dados_viagens:
-                        # Se bater o localizador ou o valor aproximado (com tolerância de centavos)
-                        if (loc_fatura and p['Loc'] and loc_fatura == p['Loc']) or (abs(valor_fatura_puro - p['ValorPuro']) < 0.20):
-                            pedido_encontrado = p['Pedido']
-                            break
-                    
-                    valor_exibicao = valor_fatura if ',' in valor_fatura and len(valor_fatura.split(',')[1]) == 2 else f"{valor_fatura}0"
-                    final_dados.append([data_m.group(1), descricao, valor_exibicao, pedido_encontrado])
+        if not lancamentos:
+            st.error("Nao foi possivel extrair lancamentos da fatura para esse titular.")
+            st.stop()
 
-            # --- 5. EXIBIÇÃO DOS RESULTADOS ---
-            st.write(f"### 📋 Lançamentos encontrados para: **{nome_selecionado}**")
-            
-            if final_dados:
-                df_visualizacao = pd.DataFrame(final_dados, columns=["Data", "Descrição da Fatura", "Valor", "Nº Pedido Encontrado"])
-                st.table(df_visualizacao)
-                
-                # --- GERADOR DO PDF DE SAÍDA ---
-                pdf = FPDF()
-                pdf.add_page()
-                pdf.set_font("Arial", "B", 14)
-                pdf.cell(190, 10, f"Relatorio de Conciliacao - {nome_selecionado}", ln=True, align='C')
-                pdf.ln(5)
+        if not referencias:
+            st.warning(
+                "Nao consegui extrair referencias dos PDFs enviados. Ainda assim, mostro os lancamentos da fatura."
+            )
 
-                pdf.set_font("Arial", "B", 10)
-                pdf.set_fill_color(230, 230, 230)
-                pdf.cell(20, 10, "Data", 1, 0, 'C', True)
-                pdf.cell(85, 10, "Descricao Fatura", 1, 0, 'L', True)
-                pdf.cell(35, 10, "Valor", 1, 0, 'C', True)
-                pdf.cell(50, 10, "Numero Pedido", 1, 1, 'C', True)
+        resultado = conciliar_lancamentos(lancamentos, referencias) if referencias else []
 
-                pdf.set_font("Arial", "", 9)
-                for r in final_dados:
-                    pdf.cell(20, 10, r[0], 1, 0, 'C')
-                    pdf.cell(85, 10, r[1][:45], 1, 0, 'L')
-                    pdf.cell(35, 10, r[2], 1, 0, 'C')
-                    if r[3] == "PENDENTE":
-                        pdf.set_text_color(255, 0, 0)
-                    pdf.cell(50, 10, r[3], 1, 1, 'C')
-                    pdf.set_text_color(0, 0, 0)
+        st.subheader("Lancamentos da fatura")
+        df_lancamentos = pd.DataFrame(
+            [
+                {
+                    "Data": l.data,
+                    "Descricao": l.descricao,
+                    "Localizador": l.localizador or "",
+                    "Valor": l.valor_texto,
+                }
+                for l in lancamentos
+            ]
+        )
+        st.dataframe(df_lancamentos, use_container_width=True)
 
-                pdf_output = pdf.output(dest='S').encode('latin1')
-                
+        if resultado:
+            st.subheader("Conciliacao")
+            df_resultado = pd.DataFrame(resultado)
+            st.dataframe(df_resultado, use_container_width=True)
+
+            pendentes = int((df_resultado["Status"] == "PENDENTE").sum())
+            ambiguos = int((df_resultado["Status"] == "AMBIGUO").sum())
+            st.info(
+                f"Processados: {len(df_resultado)} | Pendentes: {pendentes} | Ambiguos: {ambiguos}"
+            )
+
+            pdf_bytes = gerar_pdf(resultado)
+            xlsx_bytes = gerar_excel(resultado)
+            csv_bytes = gerar_csv(resultado)
+
+            if pdf_bytes:
                 st.download_button(
-                    label=f"📥 Baixar Relatório de {nome_selecionado} (PDF)",
-                    data=pdf_output,
-                    file_name=f"Conciliacao_{nome_selecionado.replace(' ', '_')}.pdf",
-                    mime="application/pdf"
+                    "Baixar PDF",
+                    data=pdf_bytes,
+                    file_name=nome_arquivo_saida(titular, "pdf"),
+                    mime="application/pdf",
                 )
             else:
-                st.warning("Nenhum lançamento de compras válido foi localizado para este funcionário.")
+                st.warning("Biblioteca fpdf nao encontrada. O PDF de saida foi desativado.")
+
+            st.download_button(
+                "Baixar Excel",
+                data=xlsx_bytes,
+                file_name=nome_arquivo_saida(titular, "xlsx"),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            st.download_button(
+                "Baixar CSV",
+                data=csv_bytes,
+                file_name=nome_arquivo_saida(titular, "csv"),
+                mime="text/csv",
+            )
+        else:
+            st.warning("Nao houve referencias suficientes para fazer a conciliacao.")
