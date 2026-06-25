@@ -1,21 +1,21 @@
 import io
 import re
 import unicodedata
+from collections import defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional
 
 import pandas as pd
 import pypdf
-
 try:
     from fpdf import FPDF
-except ImportError:
+except ImportError:  # pragma: no cover - fallback for local parsing/tests
     FPDF = None
 
 try:
     import streamlit as st
-except ImportError:
+except ImportError:  # pragma: no cover - fallback for local parsing/tests
     class _StreamlitFallback:
         def set_page_config(self, *args, **kwargs):
             return None
@@ -56,9 +56,6 @@ except ImportError:
         def download_button(self, *args, **kwargs):
             return None
 
-        def markdown(self, *args, **kwargs):
-            return None
-
         def stop(self):
             raise SystemExit
 
@@ -67,6 +64,7 @@ except ImportError:
 
 st.set_page_config(page_title="Conciliador de Cartao", layout="wide")
 
+
 TOLERANCIA_VALOR = Decimal("0.20")
 
 CSS_APP = """
@@ -74,14 +72,18 @@ CSS_APP = """
 :root {
     --mse: #e91e4f;
     --dark: #1e293b;
-    --bg: #f1f5f9;
-    --surface: #ffffff;
-    --border: #111827;
-    --text: #1e293b;
-    --text-muted: #94a3b8;
+    --bg: #f5f7fb;
     --pendente: #facc15;
     --estorno: #ef4444;
     --duplicado: #3b82f6;
+}
+
+html, body, [class*="css"] {
+    font-family: Arial, Helvetica, sans-serif;
+}
+
+body {
+    background: var(--bg);
 }
 
 div.block-container {
@@ -90,15 +92,23 @@ div.block-container {
     max-width: 1600px;
 }
 
+.stApp {
+    background: var(--bg);
+}
+
 .mse-topbar {
     background: var(--dark);
     color: white;
-    border-radius: 10px;
-    padding: 12px 16px;
+    border-radius: 0 0 10px 10px;
+    padding: 10px 16px;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 14px;
+    margin: 0 0 18px 0;
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.18);
 }
 
 .mse-brand {
@@ -109,15 +119,45 @@ div.block-container {
 }
 
 .small-muted {
-    color: var(--text-muted);
+    color: #94a3b8;
     font-size: 12px;
+}
+
+.app-title {
+    color: #0f172a;
+    font-size: 36px;
+    line-height: 1.1;
+    font-weight: 800;
+    margin: 14px 0 10px 0;
+}
+
+.app-subtitle {
+    color: #475569;
+    font-size: 15px;
+    margin-bottom: 22px;
+}
+
+.panel {
+    background: #ffffff;
+    border: 1px solid #d7deea;
+    border-radius: 10px;
+    padding: 14px;
+    margin-bottom: 16px;
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.05);
+}
+
+.panel-title {
+    font-weight: 800;
+    color: #0f172a;
+    font-size: 16px;
+    margin: 0 0 10px 0;
 }
 
 .summary-row {
     display: flex;
     gap: 12px;
     flex-wrap: wrap;
-    margin: 8px 0 16px 0;
+    margin: 8px 0 10px 0;
 }
 
 .summary-card {
@@ -136,11 +176,11 @@ div.block-container {
 
 .summary-value {
     font-size: 18px;
-    font-weight: 700;
+    font-weight: 800;
     color: #0f172a;
 }
 
-.badge {
+.chip {
     display: inline-block;
     border-radius: 999px;
     padding: 3px 10px;
@@ -148,14 +188,14 @@ div.block-container {
     font-weight: 700;
 }
 
-.badge-ok { background: #dcfce7; color: #166534; }
-.badge-pendente { background: #fef3c7; color: #92400e; }
-.badge-estorno { background: #fee2e2; color: #991b1b; }
-.badge-duplicado { background: #dbeafe; color: #1d4ed8; }
+.chip-ok { background: #dcfce7; color: #166534; }
+.chip-pendente { background: #fef3c7; color: #92400e; }
+.chip-estorno { background: #fee2e2; color: #991b1b; }
+.chip-duplicado { background: #dbeafe; color: #1d4ed8; }
 
 .table-wrap {
     overflow-x: auto;
-    border: 1px solid var(--border);
+    border: 1px solid #111827;
     border-radius: 8px;
     background: white;
 }
@@ -166,39 +206,37 @@ div.block-container {
     font-size: 13px;
 }
 
-.mse-table thead th {
+.row-estorno td { background: #fee2e2 !important; color: #b91c1c !important; }
+.row-pendente td { background: #fef3c7 !important; color: #92400e !important; }
+.row-duplicado td { background: #dbeafe !important; color: #1d4ed8 !important; }
+.row-ok td { background: #ffffff !important; color: #111827 !important; }
+
+thead th {
     background: #e5e7eb;
     color: #0f172a;
-    border: 1px solid var(--border);
+    border: 1px solid #111827;
     padding: 8px;
     text-align: left;
     font-weight: 700;
 }
 
-.mse-table tbody td {
-    border: 1px solid var(--border);
+tbody td {
+    border: 1px solid #111827;
     padding: 7px 8px;
     vertical-align: top;
 }
 
-.mse-table tbody tr.row-estorno td {
-    background: #fee2e2 !important;
-    color: #b91c1c !important;
+.controls-row {
+    display: grid;
+    grid-template-columns: 1.6fr 1.6fr 1fr auto;
+    gap: 14px;
+    align-items: end;
 }
 
-.mse-table tbody tr.row-pendente td {
-    background: #fef3c7 !important;
-    color: #92400e !important;
-}
-
-.mse-table tbody tr.row-duplicado td {
-    background: #dbeafe !important;
-    color: #1d4ed8 !important;
-}
-
-.mse-table tbody tr.row-ok td {
-    background: #ffffff !important;
-    color: #111827 !important;
+@media (max-width: 1200px) {
+    .controls-row {
+        grid-template-columns: 1fr;
+    }
 }
 </style>
 """
@@ -444,7 +482,7 @@ def extrair_referencia_hospedagem(texto: str, arquivo: str) -> List[ReferenciaPe
         if valor is None:
             continue
 
-        restante = texto_busca[match.end(7):]
+        restante = texto_busca[match.end(7) :]
         intine = None
         pedido = None
         intine_match = re.search(r"\b(\d{10,15})\b\s+(\d{4,7})\b", restante)
@@ -715,6 +753,56 @@ def classe_linha(status: str) -> str:
     return "row-ok"
 
 
+def chip_status(status: str) -> str:
+    if status == "ESTORNO":
+        return '<span class="chip chip-estorno">ESTORNO</span>'
+    if status == "PENDENTE":
+        return '<span class="chip chip-pendente">PENDENTE</span>'
+    if status == "AMBIGUO":
+        return '<span class="chip chip-duplicado">DUPLICADO</span>'
+    return '<span class="chip chip-ok">OK</span>'
+
+
+def render_table_html(df: pd.DataFrame) -> str:
+    cols = list(df.columns)
+    html = ['<div class="table-wrap">', '<table class="mse-table">', '<thead><tr>']
+    for col in cols:
+        html.append(f"<th>{col}</th>")
+    html.append("</tr></thead><tbody>")
+
+    for _, row in df.iterrows():
+        status = str(row.get("Status", ""))
+        html.append(f'<tr class="{classe_linha(status)}">')
+        for col in cols:
+            value = row.get(col, "")
+            if col == "Status":
+                value = chip_status(str(value))
+            else:
+                value = str(value)
+            html.append(f"<td>{value}</td>")
+        html.append("</tr>")
+
+    html.append("</tbody></table></div>")
+    return "".join(html)
+
+
+def resumo_html(df: pd.DataFrame) -> str:
+    total = len(df)
+    estornos = int((df["Status"] == "ESTORNO").sum()) if total else 0
+    pendentes = int((df["Status"] == "PENDENTE").sum()) if total else 0
+    ambiguos = int((df["Status"] == "AMBIGUO").sum()) if total else 0
+    ok = int((df["Status"] == "OK").sum()) if total else 0
+    return f"""
+    <div class="summary-row">
+        <div class="summary-card"><div class="summary-label">Processados</div><div class="summary-value">{total}</div></div>
+        <div class="summary-card"><div class="summary-label">OK</div><div class="summary-value">{ok}</div></div>
+        <div class="summary-card"><div class="summary-label">Estornos</div><div class="summary-value">{estornos}</div></div>
+        <div class="summary-card"><div class="summary-label">Pendentes</div><div class="summary-value">{pendentes}</div></div>
+        <div class="summary-card"><div class="summary-label">Duplicados</div><div class="summary-value">{ambiguos}</div></div>
+    </div>
+    """
+
+
 def nome_arquivo_saida(nome: str, extensao: str) -> str:
     base = ascii_fold(nome).replace(" ", "_")
     base = re.sub(r"[^A-Z0-9_]+", "", base)
@@ -728,34 +816,43 @@ st.markdown(
     <div class="mse-topbar">
         <div class="mse-brand">
             <span style="width:12px;height:12px;border-radius:999px;background:var(--mse);display:inline-block"></span>
-            <span>Conciliação Cartão</span>
+            <span>Modelo App Script - <span style="color:#e91e4f;">Conciliador Faturas</span></span>
         </div>
-        <div class="small-muted">Modelo MSE</div>
+        <div class="small-muted">MSE Portal</div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-st.title("Conciliador de Cartao")
-st.write(
-    "Envie a fatura e um ou mais PDFs de apoio para extrair os lancamentos e cruzar os valores."
+st.markdown('<div class="app-title">Conciliador de Cartao</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="app-subtitle">Envie a fatura e os arquivos de apoio para extrair os lancamentos e cruzar os valores.</div>',
+    unsafe_allow_html=True,
 )
 
-arquivo_fatura = st.file_uploader("Fatura em PDF", type=["pdf"], key="fatura")
+st.markdown('<div class="panel"><div class="panel-title">Arquivos</div>', unsafe_allow_html=True)
+st.markdown('<div class="upload-label">Fatura em PDF</div>', unsafe_allow_html=True)
+arquivo_fatura = st.file_uploader("", type=["pdf"], key="fatura", label_visibility="collapsed")
+st.markdown('<div class="upload-label" style="margin-top:12px;">Planilhas/relatorios em PDF</div>', unsafe_allow_html=True)
 arquivos_ref = st.file_uploader(
-    "Planilhas/relatorios em PDF", type=["pdf"], accept_multiple_files=True, key="refs"
+    "", type=["pdf"], accept_multiple_files=True, key="refs", label_visibility="collapsed"
 )
+st.markdown('</div>', unsafe_allow_html=True)
 
 if arquivo_fatura:
     texto_fatura = ler_pdf_bytes(arquivo_fatura.getvalue())
     titulares = detectar_titulares(texto_fatura)
 
+    st.markdown('<div class="panel"><div class="panel-title">Selecionar titular</div>', unsafe_allow_html=True)
     if titulares:
-        titular = st.selectbox("Selecionar titular", titulares)
+        titular = st.selectbox("", titulares, label_visibility="collapsed")
     else:
-        titular = st.text_input("Nome do titular na fatura", value="ARIANI DE SOUZA")
+        titular = st.text_input("", value="ARIANI DE SOUZA", label_visibility="collapsed")
 
-    if st.button("Processar"):
+    botao = st.button("Processar")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if botao:
         lancamentos = extrair_lancamentos_fatura(texto_fatura, titular)
 
         referencias = []
@@ -776,7 +873,6 @@ if arquivo_fatura:
 
         resultado = conciliar_lancamentos(lancamentos, referencias) if referencias else []
 
-        st.subheader("Lancamentos da fatura")
         df_lancamentos = pd.DataFrame(
             [
                 {
@@ -788,33 +884,17 @@ if arquivo_fatura:
                 for l in lancamentos
             ]
         )
-        st.dataframe(df_lancamentos, use_container_width=True)
+        st.markdown('<div class="panel"><div class="panel-title">Lancamentos da fatura</div>', unsafe_allow_html=True)
+        st.markdown(resumo_html(df_lancamentos), unsafe_allow_html=True)
+        st.markdown(render_table_html(df_lancamentos), unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
         if resultado:
-            st.subheader("Conciliacao")
             df_resultado = pd.DataFrame(resultado)
-
-            def estilo_linha(row):
-                status = str(row["Status"])
-                if status == "ESTORNO":
-                    return ["background-color: #fee2e2; color: #b91c1c;"] * len(row)
-                if status == "PENDENTE":
-                    return ["background-color: #fef3c7; color: #92400e;"] * len(row)
-                if status == "AMBIGUO":
-                    return ["background-color: #dbeafe; color: #1d4ed8;"] * len(row)
-                return ["background-color: #ffffff; color: #111827;"] * len(row)
-
-            st.dataframe(
-                df_resultado.style.apply(estilo_linha, axis=1),
-                use_container_width=True,
-            )
-
-            pendentes = int((df_resultado["Status"] == "PENDENTE").sum())
-            ambiguos = int((df_resultado["Status"] == "AMBIGUO").sum())
-            estornos = int((df_resultado["Status"] == "ESTORNO").sum())
-            st.info(
-                f"Processados: {len(df_resultado)} | Estornos: {estornos} | Pendentes: {pendentes} | Ambiguos: {ambiguos}"
-            )
+            st.markdown('<div class="panel"><div class="panel-title">Conciliacao</div>', unsafe_allow_html=True)
+            st.markdown(resumo_html(df_resultado), unsafe_allow_html=True)
+            st.markdown(render_table_html(df_resultado), unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
 
             pdf_bytes = gerar_pdf(resultado)
             xlsx_bytes = gerar_excel(resultado)
