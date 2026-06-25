@@ -56,6 +56,9 @@ except ImportError:  # pragma: no cover - fallback for local parsing/tests
         def download_button(self, *args, **kwargs):
             return None
 
+        def markdown(self, *args, **kwargs):
+            return None
+
         def stop(self):
             raise SystemExit
 
@@ -312,9 +315,15 @@ def detectar_titulares(texto_fatura: str) -> List[str]:
             r"^([A-Z][A-Z ]{3,80}?)\s+CARTAO\s+\d{4}\s+XXXX\s+XXXX\s+\d{4}\b",
             linha_busca,
         )
+        m2 = re.match(
+            r"^([A-Z][A-Z ]{3,80}?)\s+\d{4}\s+XXXX\s+XXXX\s+\d{4}\b",
+            linha_busca,
+        )
         nome = None
         if m1:
             nome = salvar_nome_titular(m1.group(1))
+        elif m2 and "TRANSACOES" not in linha_busca:
+            nome = salvar_nome_titular(m2.group(1))
 
         if nome and len(nome.split()) >= 2:
             candidatos.append(nome)
@@ -338,6 +347,11 @@ def localizar_secao_titular(texto_fatura: str, nome_titular: str) -> str:
             linha_busca,
         ):
             cabecalhos.append(idx)
+        elif re.search(
+            r"^[A-Z][A-Z ]{3,80}\s+\d{4}\s+XXXX\s+XXXX\s+\d{4}\b",
+            linha_busca,
+        ) and "TRANSACOES" not in linha_busca:
+            cabecalhos.append(idx)
 
     inicio = None
     for idx in cabecalhos:
@@ -357,6 +371,33 @@ def localizar_secao_titular(texto_fatura: str, nome_titular: str) -> str:
 
     secao = linhas[inicio:fim]
     return "\n".join(secao)
+
+
+def localizar_secao_santander(texto_fatura: str, nome_titular: str) -> str:
+    linhas = texto_fatura.splitlines()
+    nome_busca = ascii_fold(nome_titular)
+    inicio = None
+    fim = len(linhas)
+
+    for idx, linha in enumerate(linhas):
+        linha_busca = ascii_fold(linha)
+        if nome_busca in linha_busca and re.search(r"\d{4}\s+XXXX\s+XXXX\s+\d{4}", linha_busca):
+            inicio = idx
+            break
+
+    if inicio is None:
+        return ""
+
+    for idx in range(inicio + 1, len(linhas)):
+        linha_busca = ascii_fold(linhas[idx])
+        if re.search(r"^[A-Z][A-Z ]{3,80}\s+\d{4}\s+XXXX\s+XXXX\s+\d{4}\b", linha_busca) and nome_busca not in linha_busca:
+            fim = idx
+            break
+        if linha_busca.startswith("TOTAL EM R$"):
+            fim = idx
+            break
+
+    return "\n".join(linhas[inicio:fim])
 
 
 def agrupar_blocos_transacao(linhas: List[str]) -> List[List[str]]:
@@ -440,11 +481,52 @@ def extrair_lancamento_bloco(bloco: List[str]) -> Optional[LancamentoFatura]:
 def extrair_lancamentos_fatura(texto_fatura: str, nome_titular: str) -> List[LancamentoFatura]:
     secao = localizar_secao_titular(texto_fatura, nome_titular)
     if not secao:
+        secao = localizar_secao_santander(texto_fatura, nome_titular)
+    if not secao:
         return []
 
     linhas = secao.splitlines()
     if linhas:
         linhas = linhas[1:]
+
+    if any("TRANSACOES NACIONAIS" in ascii_fold(l) for l in linhas):
+        lancamentos = []
+        padrao = re.compile(
+            r"^(\d{2}-\d{2}-\d{4})\s+(.+?)\s+(-?\d[\d\.,]*)\s*$",
+            re.IGNORECASE,
+        )
+        for linha in linhas:
+            linha_busca = ascii_fold(linha)
+            if linha_busca.startswith("TOTAL EM R$"):
+                break
+            if linha_busca.startswith("TRANSACOES") or not re.match(r"^\d{2}-\d{2}-\d{4}", linha_busca):
+                continue
+
+            match = padrao.match(linha_busca)
+            if not match:
+                # tenta capturar linhas com espaços estranhos no fim
+                alt = re.match(r"^(\d{2}-\d{2}-\d{4})\s+(.+?)\s+(-?\d[\d\.,]*)\s*$", linha_busca)
+                if not alt:
+                    continue
+                match = alt
+
+            valor_texto = match.group(3).replace(" ", "")
+            valor_base = moeda_para_decimal(valor_texto.replace("-", "").strip())
+            if valor_base is None:
+                continue
+            valor = -valor_base if valor_texto.startswith("-") else valor_base
+            descricao = re.sub(r"\s+", " ", match.group(2)).strip()
+            lancamentos.append(
+                LancamentoFatura(
+                    data=match.group(1).replace("-", "/")[:5],
+                    descricao=descricao[:140],
+                    valor_texto=valor_texto,
+                    valor=valor.copy_abs(),
+                    localizador=extrair_localizador(linha_busca),
+                    bruto_texto=linha,
+                )
+            )
+        return lancamentos
 
     blocos = agrupar_blocos_transacao(linhas)
     lancamentos = []
