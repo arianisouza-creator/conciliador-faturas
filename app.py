@@ -748,7 +748,11 @@ def lancamento_e_estorno(lancamento: LancamentoFatura) -> bool:
     bruto = ascii_fold(lancamento.bruto_texto)
     if str(lancamento.valor_texto).startswith("-"):
         return True
-    if re.search(r"-\s*(?:R\$)?\s*%s\b" % re.escape(lancamento.valor_texto), bruto):
+    if re.search(r"\b%s\b\s*-\s*$" % re.escape(str(lancamento.valor_texto).replace("-", "").strip()), bruto):
+        return True
+    if re.search(r"\b%s\b\s*-\b" % re.escape(str(lancamento.valor_texto).replace("-", "").strip()), bruto):
+        return True
+    if re.search(r"-\s*(?:R\$)?\s*%s\b" % re.escape(str(lancamento.valor_texto).replace("-", "").strip()), bruto):
         return True
     if "ESTORNO" in bruto or "CANCEL" in bruto:
         return True
@@ -982,7 +986,14 @@ def nome_arquivo_saida(nome: str, extensao: str) -> str:
 
 
 def limpar_tela():
-    for chave in ["fatura", "refs", "titular_texto", "titular_idx"]:
+    for chave in [
+        "fatura",
+        "refs",
+        "titular_texto",
+        "titular_idx",
+        "arquivo_fatura",
+        "arquivos_ref",
+    ]:
         if chave in st.session_state:
             del st.session_state[chave]
     st.rerun()
