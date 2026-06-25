@@ -632,19 +632,47 @@ def extrair_referencia_hospedagem(texto: str, arquivo: str) -> List[ReferenciaPe
 
 def extrair_referencia_portal(texto: str, arquivo: str) -> List[ReferenciaPedido]:
     texto_busca = ascii_fold(texto)
-    padrao = re.compile(
-        r"\b([A-Z0-9]{6})\b.*?\b(\d{4,7})\b.*?R\$\s*([\d\.,]+)",
-        re.IGNORECASE,
-    )
     itens = []
 
-    for match in padrao.finditer(texto_busca):
-        valor = moeda_para_decimal(match.group(3))
+    for loc_match in re.finditer(r"\b([A-Z0-9]{6})\b", texto_busca):
+        localizador = loc_match.group(1).upper()
+        if localizador.isdigit():
+            continue
+
+        janela = texto_busca[loc_match.end() : loc_match.end() + 140]
+        valor_match = re.search(r"R\$\s*([\d\.,]+)", janela)
+        if not valor_match:
+            continue
+
+        valor = moeda_para_decimal(valor_match.group(1))
         if valor is None:
             continue
 
-        pedido = match.group(2)
-        if eh_ano_ou_data(pedido):
+        antes_valor = janela[: valor_match.start()]
+        candidatos = []
+        for candidato in re.findall(r"\b\d{4,7}\b", antes_valor):
+            if eh_ano_ou_data(candidato):
+                continue
+            if candidato.startswith("20") and len(candidato) == 6:
+                continue
+            candidatos.append(candidato)
+
+        pedido = None
+        if candidatos:
+            pedido = candidatos[-1]
+        else:
+            depois_valor = janela[valor_match.end() : valor_match.end() + 30]
+            candidatos = []
+            for candidato in re.findall(r"\b\d{4,7}\b", depois_valor):
+                if eh_ano_ou_data(candidato):
+                    continue
+                if candidato.startswith("20") and len(candidato) == 6:
+                    continue
+                candidatos.append(candidato)
+            if candidatos:
+                pedido = candidatos[0]
+
+        if not pedido:
             continue
 
         itens.append(
@@ -652,10 +680,10 @@ def extrair_referencia_portal(texto: str, arquivo: str) -> List[ReferenciaPedido
                 origem_arquivo=arquivo,
                 origem_tipo="portal",
                 pedido=pedido,
-                valor_texto=match.group(3),
+                valor_texto=valor_match.group(1),
                 valor=valor,
-                descricao=match.group(0)[:180],
-                localizador=match.group(1).upper(),
+                descricao=janela[:180],
+                localizador=localizador,
             )
         )
 
