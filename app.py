@@ -567,18 +567,23 @@ def extrair_referencia_hospedagem(texto: str, arquivo: str) -> List[ReferenciaPe
         restante = texto_busca[match.end(7) :]
         intine = None
         pedido = None
-        intine_match = re.search(r"\b(\d{10,15})\b\s+(\d{4,7})\b", restante)
+
+        intine_match = re.search(r"\b(\d{10,15})\b", restante)
         if intine_match:
             intine = intine_match.group(1)
-            pedido = intine_match.group(2)
+            pos_intine = intine_match.end()
+            depois_intine = restante[pos_intine:]
+            pedido_match = re.search(r"\b(\d{4,7})\b", depois_intine)
+            if pedido_match:
+                pedido = pedido_match.group(1)
         else:
-            intine_match = re.search(r"\b(\d{10,15})\b", restante)
-            if intine_match:
-                intine = intine_match.group(1)
-
-            pedidos = re.findall(r"\b(\d{4,7})\b", restante)
-            if pedidos:
-                pedido = pedidos[-1]
+            pedido_match = re.search(r"\b(\d{4,7})\b(?=[^\d]*?(?:VISITA|EVENTO|VIAGEM|MOTIVO|$))", restante)
+            if pedido_match:
+                pedido = pedido_match.group(1)
+            else:
+                pedidos = re.findall(r"\b(\d{4,7})\b", restante)
+                if pedidos:
+                    pedido = pedidos[-1]
 
         if not pedido:
             continue
@@ -661,9 +666,10 @@ def pontuar_correspondencia(lancamento: LancamentoFatura, referencia: Referencia
 
 def lancamento_e_estorno(lancamento: LancamentoFatura) -> bool:
     bruto = ascii_fold(lancamento.bruto_texto)
-    if "-" in lancamento.bruto_texto:
-        if re.search(r"-\s*(?:R\$)?\s*%s\b" % re.escape(lancamento.valor_texto), bruto):
-            return True
+    if str(lancamento.valor_texto).startswith("-"):
+        return True
+    if re.search(r"-\s*(?:R\$)?\s*%s\b" % re.escape(lancamento.valor_texto), bruto):
+        return True
     if "ESTORNO" in bruto or "CANCEL" in bruto:
         return True
     return False
@@ -894,6 +900,13 @@ def nome_arquivo_saida(nome: str, extensao: str) -> str:
     return f"Conciliacao_{base}.{extensao}"
 
 
+def limpar_tela():
+    for chave in ["fatura", "refs", "titular_texto", "titular_idx"]:
+        if chave in st.session_state:
+            del st.session_state[chave]
+    st.rerun()
+
+
 st.markdown(CSS_APP, unsafe_allow_html=True)
 
 st.markdown(
@@ -934,7 +947,11 @@ if arquivo_fatura:
     else:
         titular = st.text_input("", value="ARIANI DE SOUZA", label_visibility="collapsed")
 
-    botao = st.button("Processar")
+    col_proc, col_limpar = st.columns([1, 1])
+    with col_proc:
+        botao = st.button("Processar")
+    with col_limpar:
+        st.button("Limpar", on_click=limpar_tela)
     st.markdown('</div>', unsafe_allow_html=True)
 
     if botao:
