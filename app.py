@@ -870,10 +870,13 @@ def render_table_html(df: pd.DataFrame) -> str:
 
 def resumo_html(df: pd.DataFrame) -> str:
     total = len(df)
-    estornos = int((df["Status"] == "ESTORNO").sum()) if total else 0
-    pendentes = int((df["Status"] == "PENDENTE").sum()) if total else 0
-    ambiguos = int((df["Status"] == "AMBIGUO").sum()) if total else 0
-    ok = int((df["Status"] == "OK").sum()) if total else 0
+    if total and "Status" in df.columns:
+        estornos = int((df["Status"] == "ESTORNO").sum())
+        pendentes = int((df["Status"] == "PENDENTE").sum())
+        ambiguos = int((df["Status"] == "AMBIGUO").sum())
+        ok = int((df["Status"] == "OK").sum())
+    else:
+        estornos = pendentes = ambiguos = ok = 0
     return f"""
     <div class="summary-row">
         <div class="summary-card"><div class="summary-label">Processados</div><div class="summary-value">{total}</div></div>
@@ -967,7 +970,6 @@ if arquivo_fatura:
             ]
         )
         st.markdown('<div class="panel"><div class="panel-title">Lancamentos da fatura</div>', unsafe_allow_html=True)
-        st.markdown(resumo_html(df_lancamentos), unsafe_allow_html=True)
         st.markdown(render_table_html(df_lancamentos), unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
