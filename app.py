@@ -306,6 +306,10 @@ def selecionar_pedido_candidato(candidatos: List[str]) -> Optional[str]:
             continue
         if candidato.isdigit() and len(candidato) == 4 and eh_ano_ou_data(candidato):
             continue
+        if candidato.startswith("20") and len(candidato) == 6:
+            continue
+        if candidato.startswith("0") and len(candidato) == 6:
+            continue
         return candidato
     return None
 
@@ -455,11 +459,18 @@ def extrair_localizador(texto_busca: str) -> Optional[str]:
         "TRANS",
         "EXTERIOR",
         "IOF",
+        "VISITA",
+        "EVENTO",
+        "VIAGEM",
+        "MOTIVO",
     }
     tokens = re.findall(r"\b[A-Z0-9]{6}\b", texto_busca)
     for token in reversed(tokens):
-        if token not in excluidos and not token.isdigit():
-            return token
+        if token in excluidos or token.isdigit():
+            continue
+        if not (re.search(r"[A-Z]", token) and re.search(r"\d", token)):
+            continue
+        return token
     return None
 
 
@@ -634,26 +645,35 @@ def extrair_referencia_portal(texto: str, arquivo: str) -> List[ReferenciaPedido
     texto_busca = ascii_fold(texto)
     itens = []
 
-    for loc_match in re.finditer(r"\b([A-Z0-9]{6})\b", texto_busca):
-        localizador = loc_match.group(1).upper()
-        if localizador.isdigit():
-            continue
+    for valor_match in re.finditer(r"R\$\s*([\d\.,]+)", texto_busca):
+        inicio_janela = max(0, valor_match.start() - 90)
+        janela = texto_busca[inicio_janela : valor_match.start() + 40]
+        localizador = None
 
-        janela = texto_busca[loc_match.end() : loc_match.end() + 140]
-        valor_match = re.search(r"R\$\s*([\d\.,]+)", janela)
-        if not valor_match:
+        locs = re.findall(r"\b[A-Z0-9]{6}\b", janela[: valor_match.start() - inicio_janela])
+        for token in reversed(locs):
+            if token.isdigit():
+                continue
+            if token in {"CARTAO", "TOTAL", "PARA", "PAGTO", "POR", "DEB", "EM", "CC", "CUSTO", "TRANS", "EXTERIOR", "IOF", "VISITA", "EVENTO", "VIAGEM", "MOTIVO"}:
+                continue
+            localizador = token
+            break
+
+        if not localizador:
             continue
 
         valor = moeda_para_decimal(valor_match.group(1))
         if valor is None:
             continue
 
-        antes_valor = janela[: valor_match.start()]
+        antes_valor = janela[: valor_match.start() - inicio_janela]
         candidatos = []
         for candidato in re.findall(r"\b\d{4,7}\b", antes_valor):
             if eh_ano_ou_data(candidato):
                 continue
             if candidato.startswith("20") and len(candidato) == 6:
+                continue
+            if candidato.startswith("0") and len(candidato) == 6:
                 continue
             candidatos.append(candidato)
 
@@ -661,12 +681,14 @@ def extrair_referencia_portal(texto: str, arquivo: str) -> List[ReferenciaPedido
         if candidatos:
             pedido = candidatos[-1]
         else:
-            depois_valor = janela[valor_match.end() : valor_match.end() + 30]
+            depois_valor = texto_busca[valor_match.end() : valor_match.end() + 18]
             candidatos = []
             for candidato in re.findall(r"\b\d{4,7}\b", depois_valor):
                 if eh_ano_ou_data(candidato):
                     continue
                 if candidato.startswith("20") and len(candidato) == 6:
+                    continue
+                if candidato.startswith("0") and len(candidato) == 6:
                     continue
                 candidatos.append(candidato)
             if candidatos:
@@ -775,8 +797,9 @@ def conciliar_lancamentos(
             pontuados.sort(key=lambda item: (item[0], item[1].pedido), reverse=True)
             melhor_score, melhor_ref = pontuados[0]
             empatados = [item for item in pontuados if item[0] == melhor_score]
+            pedidos_empatados = {item[1].pedido for item in empatados if item[1].pedido}
 
-            if len(empatados) == 1 and melhor_score > 0:
+            if len(pedidos_empatados) <= 1 and melhor_score > 0:
                 escolhido = melhor_ref
                 if lancamento.localizador and melhor_ref.localizador and lancamento.localizador == melhor_ref.localizador:
                     criterio = "Localizador"
@@ -785,14 +808,14 @@ def conciliar_lancamentos(
                 else:
                     criterio = "Valor"
                 status = "OK"
-            elif len(empatados) == 1:
+            elif len(pedidos_empatados) <= 1:
                 escolhido = melhor_ref
                 criterio = "Valor"
                 status = "OK"
             else:
                 status = "AMBIGUO"
                 criterio = "Valor duplicado"
-                pedido_extra = ", ".join(sorted({item[1].pedido for item in empatados}))
+                pedido_extra = ", ".join(sorted(pedidos_empatados))
 
         pedido = escolhido.pedido if escolhido else ""
         origem = escolhido.origem_arquivo if escolhido else ""
